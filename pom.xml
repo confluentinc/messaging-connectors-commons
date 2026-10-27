@@ -462,12 +462,17 @@ limitations under the License.]]></inlineHeader>
         <groupId>org.sonatype.plugins</groupId>
         <artifactId>nexus-staging-maven-plugin</artifactId>
         <version>1.6.8</version>
-        <extensions>true</extensions>
+        <!-- Confluent fork: disable the nexus-staging (Sonatype OSSRH) deploy hijack so the
+             standard maven-deploy-plugin runs and honors -DaltDeploymentRepository (CodeArtifact).
+             extensions=false restores the normal deploy-goal binding; skipNexusStagingDeployMojo
+             is a belt-and-suspenders guard. -->
+        <extensions>false</extensions>
         <configuration>
           <serverId>ossrh</serverId>
           <nexusUrl>https://oss.sonatype.org/</nexusUrl>
           <autoReleaseAfterClose>false</autoReleaseAfterClose>
           <skipLocalStaging>true</skipLocalStaging>
+          <skipNexusStagingDeployMojo>true</skipNexusStagingDeployMojo>
         </configuration>
       </plugin>
     </plugins>
