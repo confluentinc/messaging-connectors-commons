@@ -1,0 +1,33 @@
+name: messaging-connectors-commons
+lang: java
+lang_version: "8"
+git:
+  enable: true
+codeowners:
+  enable: true
+semaphore:
+  enable: true
+  pipeline_type: cp
+  # pipeline_enable: false -> ServiceBot does NOT generate/overwrite
+  # .semaphore/semaphore.yml; we hand-maintain it so release versions (1.0.16-N)
+  # deploy to maven-releases (the default cp template deploys to maven-snapshots).
+  # Same pattern as our engine build repo kafka-connect-datastax-private.
+  # ServiceBot still manages CODEOWNERS, code_artifact, renovate, etc.
+  pipeline_enable: false
+  cve_scan: true
+  # Confluent CI runs ONLY on our release branches (X.Y.Z.x, e.g. 1.0.16.x);
+  # `master` is excluded (mirrors upstream 1.0.17-SNAPSHOT). Deploy is gated to
+  # the X.Y.Z.x branches in our hand-maintained .semaphore/semaphore.yml;
+  # PR/feature branches get build+test only -- no deploy, no creds.
+  branches:
+    - /^\d+\.\d+\.\d+\.x$/
+    - /^gh-readonly-queue.*/
+# Confluent fork of datastax/messaging-connectors-commons. We republish the
+# upstream artifacts (keeping the com.datastax.oss GAV) with a Debezium-style
+# `-N` build suffix to Confluent CodeArtifact maven-releases (immutable releases).
+code_artifact:
+  enable: true
+  package_paths:
+    - maven-releases/maven/com.datastax.oss/messaging-connectors-commons-core
+    - maven-releases/maven/com.datastax.oss/dsbulk-codecs-text-messaging-components-fork
+    - maven-releases/maven/com.datastax.oss/messaging-connectors-commons-parent
