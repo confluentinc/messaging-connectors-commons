@@ -10,7 +10,7 @@ semaphore:
   pipeline_type: cp
   # pipeline_enable: false -> ServiceBot does NOT generate/overwrite
   # .semaphore/semaphore.yml; we hand-maintain it. Main pipeline is build+test only;
-  # publishing an incremental 1.0.16-N is a MANUAL promotion
+  # an incremental 1.0.16-N auto-publishes after each green release-branch build
   # (.semaphore/release-internal-version.yml), aligned with kafka-connect-jdbc.
   # ServiceBot still manages CODEOWNERS, code_artifact, renovate, etc.
   pipeline_enable: false
