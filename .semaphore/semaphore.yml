@@ -1,8 +1,5 @@
-# HAND-MAINTAINED (not ServiceBot-generated). service.yml sets
-# `semaphore.pipeline_enable: false` so ServiceBot does NOT overwrite this file.
-# We own it because the default cp template deploys to maven-snapshots, and we
-# publish release versions (1.0.16-N) to maven-releases (immutable). Based on the
-# generated cp template; same ownership pattern as kafka-connect-datastax-private.
+# Hand-maintained (service.yml sets pipeline_enable: false). Build + test only;
+# incrementals auto-publish via the release-internal-version promotion at the bottom.
 version: v1.0
 name: build-test-release
 agent:
@@ -17,7 +14,6 @@ execution_time_limit:
   hours: 1
 
 queue:
-  # Non-release branches run in parallel; release branches (X.Y.Z.x) queue serially.
   - when: "branch !~ '[0-9]+\\.[0-9]+\\.[0-9]+\\.x'"
     processing: parallel
 
@@ -32,7 +28,6 @@ blocks:
   - name: Test
     dependencies: []
     run:
-      # don't run the tests on non-functional changes...
       when: "change_in('/', {exclude: ['/.deployed-versions/', '/.github/', '/service.yml', '/README.md'], default_branch: 'master'})"
     task:
       jobs:
@@ -48,18 +43,6 @@ blocks:
             - . publish-test-results
             - artifact push workflow target/test-results
             - artifact push workflow target
-
-  - name: Release
-    dependencies: ["Test"]
-    run:
-      # Deploy ONLY from release branches (X.Y.Z.x, e.g. 1.0.16.x). master is not
-      # built; PR/feature branches run Test only -- no deploy, no credentials.
-      when: "branch =~ '[0-9]+\\.[0-9]+\\.[0-9]+\\.x'"
-    task:
-      jobs:
-        - name: Release
-          commands:
-            - mvn -U -Dmaven.wagon.http.retryHandler.count=10 --batch-mode -DaltDeploymentRepository=confluent-codeartifact-internal::default::https://confluent-519856050701.d.codeartifact.us-west-2.amazonaws.com/maven/maven-releases/ -DrepositoryId=confluent-codeartifact-internal deploy -DskipTests
 
 after_pipeline:
   task:
@@ -78,3 +61,10 @@ after_pipeline:
           - checkout
           - artifact pull workflow target
           - emit-sonarqube-data --run_only_sonar_scan
+
+# Each green release-branch (X.Y.Z.x) build auto-publishes the next 1.0.16-N + tag.
+promotions:
+  - name: Release internal version (1.0.16-N)
+    pipeline_file: release-internal-version.yml
+    auto_promote:
+      when: "result = 'passed' and branch =~ '[0-9]+\\.[0-9]+\\.[0-9]+\\.x'"
