@@ -1,4 +1,4 @@
-# Cuts the next incremental 1.0.16-N (from git tags), tags it, deploys to maven-snapshots.
+# Cuts the next incremental 1.0.16-N (from git tags), tags it, deploys to maven-releases.
 # Auto-promoted from each green release-branch build. Aligned with kafka-connect-jdbc.
 version: v1.0
 name: Release Internal Version
@@ -31,4 +31,4 @@ blocks:
               echo "Releasing ${NEXT}"
               ci-tools ci-update-version --version "${NEXT}"
             - ci-tools ci-push-tag
-            - mvn -U -Dmaven.wagon.http.retryHandler.count=10 --batch-mode --no-transfer-progress -DaltDeploymentRepository=confluent-codeartifact-internal::default::https://confluent-519856050701.d.codeartifact.us-west-2.amazonaws.com/maven/maven-snapshots/ -DrepositoryId=confluent-codeartifact-internal clean deploy -DskipTests
+            - mvn -U -Dmaven.wagon.http.retryHandler.count=10 --batch-mode --no-transfer-progress -DaltDeploymentRepository=confluent-codeartifact-internal::default::https://confluent-519856050701.d.codeartifact.us-west-2.amazonaws.com/maven/maven-releases/ -DrepositoryId=confluent-codeartifact-internal clean deploy -DskipTests

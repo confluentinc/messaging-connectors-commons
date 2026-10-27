@@ -15,10 +15,10 @@ semaphore:
   branches:
     - /^\d+\.\d+\.\d+\.x$/
     - /^gh-readonly-queue.*/
-# Incremental 1.0.16-N builds, published to CodeArtifact maven-snapshots.
+# Incremental 1.0.16-N builds, published to CodeArtifact maven-releases (immutable).
 code_artifact:
   enable: true
   package_paths:
-    - maven-snapshots/maven/com.datastax.oss/messaging-connectors-commons-core
-    - maven-snapshots/maven/com.datastax.oss/dsbulk-codecs-text-messaging-components-fork
-    - maven-snapshots/maven/com.datastax.oss/messaging-connectors-commons-parent
+    - maven-releases/maven/com.datastax.oss/messaging-connectors-commons-core
+    - maven-releases/maven/com.datastax.oss/dsbulk-codecs-text-messaging-components-fork
+    - maven-releases/maven/com.datastax.oss/messaging-connectors-commons-parent
