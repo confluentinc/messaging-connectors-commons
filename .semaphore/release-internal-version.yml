@@ -1,0 +1,40 @@
+version: v1.0
+name: Release Internal Version
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-1
+
+global_job_config:
+  prologue:
+    commands:
+      - checkout
+      - sem-version java 11
+      - . cache-maven restore
+
+# Manually-triggered promotion that cuts the next incremental build (1.0.16-N) of
+# this fork and publishes it to Confluent CodeArtifact maven-snapshots. Aligned with
+# kafka-connect-jdbc's internal-version release: the version is computed from git tags,
+# set via `ci-tools ci-update-version --version`, tagged via `ci-tools ci-push-tag`.
+# Run only from a green release-branch (X.Y.Z.x, e.g. 1.0.16.x) build.
+blocks:
+  - name: Release
+    dependencies: []
+    run:
+      when: "branch =~ '[0-9]+\\.[0-9]+\\.[0-9]+\\.x'"
+    task:
+      jobs:
+        - name: Release
+          commands:
+            # checkout is a shallow clone and incremental tags can sit on dangling
+            # commits, so this fetch is the source of the tags the version is computed from.
+            - git fetch --tags -q
+            - |
+              # Incremental -N over the upstream base. Base = the release branch minus '.x'
+              # (1.0.16.x -> 1.0.16); next -N = (highest existing v<base>-N tag) + 1.
+              BASE="${SEMAPHORE_GIT_BRANCH%.x}"
+              LAST=$(git tag -l | grep -E "^v${BASE//./\\.}-[0-9]+$" | sed "s|^v${BASE}-||" | sort -n | tail -1)
+              NEXT="${BASE}-$(( ${LAST:-0} + 1 ))"
+              echo "Latest build on ${BASE}: ${LAST:-none}; releasing ${NEXT}"
+              ci-tools ci-update-version --version "${NEXT}"
+            - ci-tools ci-push-tag
+            - mvn -U -Dmaven.wagon.http.retryHandler.count=10 --batch-mode --no-transfer-progress -DaltDeploymentRepository=confluent-codeartifact-internal::default::https://confluent-519856050701.d.codeartifact.us-west-2.amazonaws.com/maven/maven-snapshots/ -DrepositoryId=confluent-codeartifact-internal clean deploy -DskipTests
