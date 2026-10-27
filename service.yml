@@ -8,12 +8,17 @@ codeowners:
 semaphore:
   enable: true
   pipeline_type: cp
+  # pipeline_enable: false -> ServiceBot does NOT generate/overwrite
+  # .semaphore/semaphore.yml; we hand-maintain it so release versions (1.0.16-N)
+  # deploy to maven-releases (the default cp template deploys to maven-snapshots).
+  # Same pattern as our engine build repo kafka-connect-datastax-private.
+  # ServiceBot still manages CODEOWNERS, code_artifact, renovate, etc.
+  pipeline_enable: false
   cve_scan: true
-  # Confluent CI runs ONLY on our release branches (the `X.Y.Z.x` pattern, e.g.
-  # 1.0.16.x). `master` is intentionally excluded: it mirrors upstream
-  # 1.0.17-SNAPSHOT, and deploying a SNAPSHOT to maven-releases would fail.
-  # Deploy is gated to these release branches + tags by the generated cp
-  # pipeline; PR/feature branches get build+test only -- no deploy, no creds.
+  # Confluent CI runs ONLY on our release branches (X.Y.Z.x, e.g. 1.0.16.x);
+  # `master` is excluded (mirrors upstream 1.0.17-SNAPSHOT). Deploy is gated to
+  # the X.Y.Z.x branches in our hand-maintained .semaphore/semaphore.yml;
+  # PR/feature branches get build+test only -- no deploy, no creds.
   branches:
     - /^\d+\.\d+\.\d+\.x$/
     - /^gh-readonly-queue.*/

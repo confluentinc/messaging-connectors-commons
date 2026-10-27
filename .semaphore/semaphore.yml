@@ -1,0 +1,80 @@
+# HAND-MAINTAINED (not ServiceBot-generated). service.yml sets
+# `semaphore.pipeline_enable: false` so ServiceBot does NOT overwrite this file.
+# We own it because the default cp template deploys to maven-snapshots, and we
+# publish release versions (1.0.16-N) to maven-releases (immutable). Based on the
+# generated cp template; same ownership pattern as kafka-connect-datastax-private.
+version: v1.0
+name: build-test-release
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-1
+
+fail_fast:
+  cancel:
+    when: "true"
+
+execution_time_limit:
+  hours: 1
+
+queue:
+  # Non-release branches run in parallel; release branches (X.Y.Z.x) queue serially.
+  - when: "branch !~ '[0-9]+\\.[0-9]+\\.[0-9]+\\.x'"
+    processing: parallel
+
+global_job_config:
+  prologue:
+    commands:
+      - checkout
+      - sem-version java 8
+      - . cache-maven restore
+
+blocks:
+  - name: Test
+    dependencies: []
+    run:
+      # don't run the tests on non-functional changes...
+      when: "change_in('/', {exclude: ['/.deployed-versions/', '/.github/', '/service.yml', '/README.md'], default_branch: 'master'})"
+    task:
+      jobs:
+        - name: Test
+          commands:
+            - ci-sem-pint -c
+            - mvn -U -Dmaven.wagon.http.retryHandler.count=10 --batch-mode --no-transfer-progress clean verify install dependency:analyze validate
+            - cve-scan
+            - . cache-maven store
+      epilogue:
+        always:
+          commands:
+            - . publish-test-results
+            - artifact push workflow target/test-results
+            - artifact push workflow target
+
+  - name: Release
+    dependencies: ["Test"]
+    run:
+      # Deploy ONLY from release branches (X.Y.Z.x, e.g. 1.0.16.x). master is not
+      # built; PR/feature branches run Test only -- no deploy, no credentials.
+      when: "branch =~ '[0-9]+\\.[0-9]+\\.[0-9]+\\.x'"
+    task:
+      jobs:
+        - name: Release
+          commands:
+            - mvn -U -Dmaven.wagon.http.retryHandler.count=10 --batch-mode -DaltDeploymentRepository=confluent-codeartifact-internal::default::https://confluent-519856050701.d.codeartifact.us-west-2.amazonaws.com/maven/maven-releases/ -DrepositoryId=confluent-codeartifact-internal deploy -DskipTests
+
+after_pipeline:
+  task:
+    agent:
+      machine:
+        type: s1-prod-ubuntu24-04-arm64-00
+    jobs:
+      - name: Metrics
+        commands:
+          - emit-ci-metrics -p -a test-results
+      - name: Publish Test Results
+        commands:
+          - test-results gen-pipeline-report
+      - name: SonarQube
+        commands:
+          - checkout
+          - artifact pull workflow target
+          - emit-sonarqube-data --run_only_sonar_scan
