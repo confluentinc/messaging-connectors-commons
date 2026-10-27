@@ -8,24 +8,14 @@ codeowners:
 semaphore:
   enable: true
   pipeline_type: cp
-  # pipeline_enable: false -> ServiceBot does NOT generate/overwrite
-  # .semaphore/semaphore.yml; we hand-maintain it. Main pipeline is build+test only;
-  # an incremental 1.0.16-N auto-publishes after each green release-branch build
-  # (.semaphore/release-internal-version.yml), aligned with kafka-connect-jdbc.
-  # ServiceBot still manages CODEOWNERS, code_artifact, renovate, etc.
+  # We hand-maintain .semaphore/*.yml (ServiceBot still manages CODEOWNERS, code_artifact, etc.).
   pipeline_enable: false
   cve_scan: true
-  # Confluent CI runs ONLY on our release branches (X.Y.Z.x, e.g. 1.0.16.x);
-  # `master` is excluded (mirrors upstream 1.0.17-SNAPSHOT). Deploy is gated to
-  # the X.Y.Z.x branches in our hand-maintained .semaphore/semaphore.yml;
-  # PR/feature branches get build+test only -- no deploy, no creds.
+  # Build only release branches (X.Y.Z.x); master mirrors upstream and is excluded.
   branches:
     - /^\d+\.\d+\.\d+\.x$/
     - /^gh-readonly-queue.*/
-# Confluent fork of datastax/messaging-connectors-commons. We republish the upstream
-# artifacts (keeping the com.datastax.oss GAV) as incremental builds `1.0.16-N` to
-# Confluent CodeArtifact maven-snapshots -- the documented convention for internal -N
-# builds (same as kafka-connect-jdbc / debezium). Consumers add the maven-snapshots repo.
+# Incremental 1.0.16-N builds, published to CodeArtifact maven-snapshots.
 code_artifact:
   enable: true
   package_paths:

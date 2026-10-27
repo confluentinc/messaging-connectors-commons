@@ -127,9 +127,8 @@
           <skip>true</skip>
         </configuration>
       </plugin>
-      <!-- Confluent fork: the text module inherits nexus-staging (Sonatype OSSRH,
-           extensions=true) from its external parent dsbulk-codecs. Disable it here so
-           maven-deploy-plugin deploys to CodeArtifact via -DaltDeploymentRepository. -->
+      <!-- Confluent fork: disable nexus-staging (inherited from the external dsbulk-codecs
+           parent) so maven-deploy-plugin deploys to CodeArtifact. -->
       <plugin>
         <groupId>org.sonatype.plugins</groupId>
         <artifactId>nexus-staging-maven-plugin</artifactId>

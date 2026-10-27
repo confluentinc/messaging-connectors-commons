@@ -21,8 +21,7 @@
   <groupId>com.datastax.oss</groupId>
   <artifactId>messaging-connectors-commons-parent</artifactId>
   <packaging>pom</packaging>
-  <!-- Base (upstream) version. CI appends the Confluent build number -N at deploy
-       (versions:set in .semaphore/semaphore.yml), publishing 1.0.16-1, -2, ... -->
+  <!-- Base (upstream) version; CI appends the -N build number at release. -->
   <version>1.0.16</version>
   <name>DataStax Apache Cassandra (R) Messaging Connectors</name>
   <description>Common utilities for pulling data from Messaging middlewares and inserting into Apache Cassandra (R) or DataStax Enterprise (DSE)</description>
@@ -464,10 +463,8 @@ limitations under the License.]]></inlineHeader>
         <groupId>org.sonatype.plugins</groupId>
         <artifactId>nexus-staging-maven-plugin</artifactId>
         <version>1.6.8</version>
-        <!-- Confluent fork: disable the nexus-staging (Sonatype OSSRH) deploy hijack so the
-             standard maven-deploy-plugin runs and honors -DaltDeploymentRepository (CodeArtifact).
-             extensions=false restores the normal deploy-goal binding; skipNexusStagingDeployMojo
-             is a belt-and-suspenders guard. -->
+        <!-- Confluent fork: disable nexus-staging (Sonatype OSSRH) so maven-deploy-plugin
+             deploys to CodeArtifact via -DaltDeploymentRepository. -->
         <extensions>false</extensions>
         <configuration>
           <serverId>ossrh</serverId>
