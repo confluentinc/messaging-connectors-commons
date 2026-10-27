@@ -22,7 +22,7 @@
   <artifactId>messaging-connectors-commons-parent</artifactId>
   <packaging>pom</packaging>
   <!-- Base (upstream) version; CI appends the -N build number at release. -->
-  <version>1.0.16</version>
+  <version>1.0.16-1</version>
   <name>DataStax Apache Cassandra (R) Messaging Connectors</name>
   <description>Common utilities for pulling data from Messaging middlewares and inserting into Apache Cassandra (R) or DataStax Enterprise (DSE)</description>
   <url>https://github.com/riptano/messaging-connectors-commons</url>
