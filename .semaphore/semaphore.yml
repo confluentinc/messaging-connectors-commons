@@ -1,8 +1,10 @@
 # HAND-MAINTAINED (not ServiceBot-generated). service.yml sets
 # `semaphore.pipeline_enable: false` so ServiceBot does NOT overwrite this file.
-# We own it because the default cp template deploys to maven-snapshots, and we
-# publish release versions (1.0.16-N) to maven-releases (immutable). Based on the
-# generated cp template; same ownership pattern as kafka-connect-datastax-private.
+# Main pipeline = build + test only. Publishing an incremental 1.0.16-N is a
+# deliberate MANUAL promotion -> .semaphore/release-internal-version.yml, aligned
+# with kafka-connect-jdbc's internal-version flow: the version is computed from
+# git tags, set via `ci-tools ci-update-version`, tagged via `ci-tools ci-push-tag`,
+# and deployed to Confluent CodeArtifact maven-snapshots.
 version: v1.0
 name: build-test-release
 agent:
@@ -49,18 +51,6 @@ blocks:
             - artifact push workflow target/test-results
             - artifact push workflow target
 
-  - name: Release
-    dependencies: ["Test"]
-    run:
-      # Deploy ONLY from release branches (X.Y.Z.x, e.g. 1.0.16.x). master is not
-      # built; PR/feature branches run Test only -- no deploy, no credentials.
-      when: "branch =~ '[0-9]+\\.[0-9]+\\.[0-9]+\\.x'"
-    task:
-      jobs:
-        - name: Release
-          commands:
-            - mvn -U -Dmaven.wagon.http.retryHandler.count=10 --batch-mode -DaltDeploymentRepository=confluent-codeartifact-internal::default::https://confluent-519856050701.d.codeartifact.us-west-2.amazonaws.com/maven/maven-releases/ -DrepositoryId=confluent-codeartifact-internal deploy -DskipTests
-
 after_pipeline:
   task:
     agent:
@@ -78,3 +68,10 @@ after_pipeline:
           - checkout
           - artifact pull workflow target
           - emit-sonarqube-data --run_only_sonar_scan
+
+# Publishing an incremental build (1.0.16-N) is a deliberate, manually-triggered
+# promotion -- run it from a green release-branch (X.Y.Z.x) build once your change
+# is verified. See .semaphore/release-internal-version.yml.
+promotions:
+  - name: Release internal version (1.0.16-N)
+    pipeline_file: release-internal-version.yml
