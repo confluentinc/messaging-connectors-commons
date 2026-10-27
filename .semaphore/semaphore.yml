@@ -72,12 +72,6 @@ blocks:
             - 'echo "Publishing ${VERSION} (previous build number: ${LAST_N:-none})"'
             - 'mvn -q versions:set -DnewVersion="${VERSION}" -DprocessAllModules=true -DgenerateBackupPoms=false'
             - mvn -U -Dmaven.wagon.http.retryHandler.count=10 --batch-mode -DaltDeploymentRepository=confluent-codeartifact-internal::default::https://confluent-519856050701.d.codeartifact.us-west-2.amazonaws.com/maven/maven-releases/ -DrepositoryId=confluent-codeartifact-internal deploy -DskipTests
-            # Auto-tag v<version> via Confluent's sanctioned ci-tools (plain tag pushes are blocked
-            # in Confluent-owned repos). versions:set above left the pom at ${VERSION}, which
-            # ci-push-tag reads. Best-effort: the artifact is already published, so a tag hiccup
-            # must NOT fail the release or churn versions -- we iterate on the invocation if needed.
-            - 'git fetch --tags --quiet || true'
-            - 'echo "Tagging v${VERSION} via ci-tools ci-push-tag"; ci-tools ci-push-tag || echo "WARN: ci-tools ci-push-tag failed (non-fatal); ${VERSION} is published in CodeArtifact -- tag invocation to be fixed in a follow-up"'
 
 after_pipeline:
   task:
