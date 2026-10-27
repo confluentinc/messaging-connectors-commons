@@ -59,7 +59,25 @@ blocks:
       jobs:
         - name: Release
           commands:
+            # Auto-increment the Debezium-style -N build number. Base from the branch
+            # (1.0.16.x -> 1.0.16); next -N = (highest already-published BASE-N in CodeArtifact
+            # maven-releases) + 1. CodeArtifact is the source of truth (not git tags, which
+            # Confluent-owned repos can't push from here). maven-releases is immutable, so a
+            # miscount would safely fail rather than overwrite.
+            - 'BASE=${SEMAPHORE_GIT_BRANCH%.x}'
+            - 'META_URL=https://confluent-519856050701.d.codeartifact.us-west-2.amazonaws.com/maven/maven-releases/com/datastax/oss/messaging-connectors-commons-core/maven-metadata.xml'
+            - 'HTTP=$(curl -sS -n -o /tmp/ca-meta.xml -w "%{http_code}" "$META_URL" || echo 000)'
+            - 'if [ "$HTTP" = "200" ]; then LAST_N=$(grep -oE "${BASE}-[0-9]+" /tmp/ca-meta.xml | sed "s/^${BASE}-//" | sort -n | tail -1); elif [ "$HTTP" = "404" ]; then LAST_N=0; else echo "ERROR fetching CodeArtifact metadata (HTTP $HTTP)"; exit 1; fi'
+            - 'export VERSION=${BASE}-$(( ${LAST_N:-0} + 1 ))'
+            - 'echo "Publishing ${VERSION} (previous build number: ${LAST_N:-none})"'
+            - 'mvn -q versions:set -DnewVersion="${VERSION}" -DprocessAllModules=true -DgenerateBackupPoms=false'
             - mvn -U -Dmaven.wagon.http.retryHandler.count=10 --batch-mode -DaltDeploymentRepository=confluent-codeartifact-internal::default::https://confluent-519856050701.d.codeartifact.us-west-2.amazonaws.com/maven/maven-releases/ -DrepositoryId=confluent-codeartifact-internal deploy -DskipTests
+            # Auto-tag v<version> via Confluent's sanctioned ci-tools (plain tag pushes are blocked
+            # in Confluent-owned repos). versions:set above left the pom at ${VERSION}, which
+            # ci-push-tag reads. Best-effort: the artifact is already published, so a tag hiccup
+            # must NOT fail the release or churn versions -- we iterate on the invocation if needed.
+            - 'git fetch --tags --quiet || true'
+            - 'echo "Tagging v${VERSION} via ci-tools ci-push-tag"; ci-tools ci-push-tag || echo "WARN: ci-tools ci-push-tag failed (non-fatal); ${VERSION} is published in CodeArtifact -- tag invocation to be fixed in a follow-up"'
 
 after_pipeline:
   task:
