@@ -32,6 +32,7 @@ import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.cql.SimpleStatement;
 import com.datastax.oss.driver.api.core.metadata.schema.ColumnMetadata;
 import com.datastax.oss.driver.api.core.metadata.schema.TableMetadata;
+import com.datastax.oss.driver.api.core.servererrors.InvalidQueryException;
 import com.datastax.oss.driver.api.core.servererrors.UnauthorizedException;
 import com.datastax.oss.driver.api.core.type.DataType;
 import com.datastax.oss.driver.api.core.type.DataTypes;
@@ -42,13 +43,18 @@ import java.util.Optional;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.Function;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-/** Creates missing tables from the record schema before handing out the mapper. */
+/** Creates missing tables and adds missing columns from the record schema. */
 public class DdlSchemaReconciler implements SchemaReconciler {
+  private static final Logger log = LoggerFactory.getLogger(DdlSchemaReconciler.class);
   private static final String KEY = "key";
   private static final String VALUE = "value";
   private static final String NOW_FUNCTION = "now()";
+  private static final int MAX_CACHED_VERSIONS = 8;
 
   private final CqlSession session;
   private final CassandraSinkConfig config;
@@ -75,19 +81,19 @@ public class DdlSchemaReconciler implements SchemaReconciler {
       }
       return existing;
     }
-    Object keyId = identity(record.keySchema());
-    Object valueId = identity(record.valueSchema());
-    Resolved cached = resolved.get(tableConfig);
-    if (cached != null && cached.matches(keyId, valueId)) {
-      return cached.mapper;
+    Object keyId = record.keySchemaIdentity();
+    Object valueId = record.valueSchemaIdentity();
+    RecordMapper mapper = Resolved.find(resolved.get(tableConfig), keyId, valueId);
+    if (mapper != null) {
+      return mapper;
     }
     synchronized (locks.computeIfAbsent(tableConfig, t -> new Object())) {
-      cached = resolved.get(tableConfig);
-      if (cached != null && cached.matches(keyId, valueId)) {
-        return cached.mapper;
+      Resolved cached = resolved.get(tableConfig);
+      mapper = Resolved.find(cached, keyId, valueId);
+      if (mapper == null) {
+        mapper = reconcile(tableConfig, record);
+        resolved.put(tableConfig, Resolved.append(cached, keyId, valueId, mapper));
       }
-      RecordMapper mapper = reconcile(tableConfig, record);
-      resolved.put(tableConfig, new Resolved(keyId, valueId, mapper));
       return mapper;
     }
   }
@@ -109,6 +115,14 @@ public class DdlSchemaReconciler implements SchemaReconciler {
             String.format(
                 "Table %s is not visible after creation", tableConfig.getKeyspaceAndTable()));
       }
+    } else if (config.isEvolveTable()) {
+      table =
+          Optional.of(
+              addMissingColumns(
+                  tableConfig,
+                  table.get(),
+                  tableConfig.getMapping(),
+                  source -> explicitColumnType(tableConfig, record, source)));
     }
     return prepare(tableConfig, table.get(), tableConfig.getMapping());
   }
@@ -133,7 +147,13 @@ public class DdlSchemaReconciler implements SchemaReconciler {
                 "Table %s is not visible after creation", tableConfig.getKeyspaceAndTable()));
       }
     } else {
-      rejectMissingColumns(tableConfig, table.get(), keySchema, valueSchema, mapping);
+      table =
+          Optional.of(
+              addMissingColumns(
+                  tableConfig,
+                  table.get(),
+                  mapping,
+                  source -> sourceType(keySchema, valueSchema, source)));
     }
     return prepare(tableConfig, table.get(), mapping);
   }
@@ -190,17 +210,19 @@ public class DdlSchemaReconciler implements SchemaReconciler {
     createTable(tableConfig, partitionKey, columns);
   }
 
-  private static void rejectMissingColumns(
+  /** Adds missing mapped value columns when evolveTable is on; returns the current table. */
+  private TableMetadata addMissingColumns(
       TableConfig tableConfig,
       TableMetadata table,
-      AbstractSchema keySchema,
-      AbstractSchema valueSchema,
-      Map<CqlIdentifier, CqlIdentifier> mapping) {
+      Map<CqlIdentifier, CqlIdentifier> mapping,
+      Function<String, DataType> typeOf) {
+    List<Map.Entry<CqlIdentifier, CqlIdentifier>> missing = missingColumns(table, mapping);
+    if (missing.isEmpty()) {
+      return table;
+    }
     String missingKeyColumns =
-        mapping
-            .entrySet()
+        missing
             .stream()
-            .filter(e -> !table.getColumn(e.getKey()).isPresent())
             .filter(e -> isKeySourced(e.getValue()))
             .map(e -> e.getKey().asCql(true))
             .collect(Collectors.joining(", "));
@@ -210,28 +232,91 @@ public class DdlSchemaReconciler implements SchemaReconciler {
               "The primary key of table %s does not match the record key fields; missing key columns: %s",
               tableConfig.getKeyspaceAndTable(), missingKeyColumns));
     }
-    List<String> alters =
-        mapping
-            .entrySet()
-            .stream()
-            .filter(e -> !table.getColumn(e.getKey()).isPresent())
-            .map(
-                e ->
-                    CqlDdl.addColumn(
-                        tableConfig.getKeyspace(),
-                        tableConfig.getTable(),
-                        e.getKey(),
-                        sourceType(keySchema, valueSchema, e.getValue().asInternal())))
-            .collect(Collectors.toList());
-    if (!alters.isEmpty()) {
+    LinkedHashMap<CqlIdentifier, DataType> columns = new LinkedHashMap<>();
+    missing.forEach(e -> columns.put(e.getKey(), typeOf.apply(e.getValue().asInternal())));
+    if (!config.isEvolveTable()) {
+      String alters =
+          columns
+              .entrySet()
+              .stream()
+              .map(e -> addColumnCql(tableConfig, e.getKey(), e.getValue()))
+              .collect(Collectors.joining("; "));
       throw new SchemaMismatchException(
           String.format(
               "Table %s has no column for some record fields; add them with: %s",
-              tableConfig.getKeyspaceAndTable(), String.join("; ", alters)));
+              tableConfig.getKeyspaceAndTable(), alters));
+    }
+    return alterTable(tableConfig, columns);
+  }
+
+  private TableMetadata alterTable(
+      TableConfig tableConfig, LinkedHashMap<CqlIdentifier, DataType> columns) {
+    for (Map.Entry<CqlIdentifier, DataType> column : columns.entrySet()) {
+      try {
+        session.execute(
+            SimpleStatement.newInstance(
+                addColumnCql(tableConfig, column.getKey(), column.getValue())));
+      } catch (UnauthorizedException e) {
+        throw notAuthorized("ALTER TABLE", tableConfig, e);
+      } catch (InvalidQueryException e) {
+        // Another task or worker may have added it first.
+        session.refreshSchema();
+        checkExistingColumn(tableConfig, column.getKey(), column.getValue(), e);
+      }
+    }
+    if (!session.checkSchemaAgreement()) {
+      log.warn(
+          "Schema agreement not reached after altering table {}",
+          tableConfig.getKeyspaceAndTable());
+    }
+    session.refreshSchema();
+    return visibleTable(tableConfig);
+  }
+
+  private void checkExistingColumn(
+      TableConfig tableConfig, CqlIdentifier column, DataType type, InvalidQueryException cause) {
+    Optional<ColumnMetadata> existing = visibleTable(tableConfig).getColumn(column);
+    if (!existing.isPresent()) {
+      throw cause;
+    }
+    DataType existingType = existing.get().getType();
+    if (!existingType.equals(type)) {
+      throw new SchemaMismatchException(
+          String.format(
+              "Column %s of table %s has type %s, but the record field needs %s",
+              column.asCql(true),
+              tableConfig.getKeyspaceAndTable(),
+              existingType.asCql(true, true),
+              type.asCql(true, true)));
     }
   }
 
-  private static boolean isKeySourced(CqlIdentifier source) {
+  private TableMetadata visibleTable(TableConfig tableConfig) {
+    return LifeCycleManager.findTableMetadata(session, tableConfig)
+        .orElseThrow(
+            () ->
+                new IllegalStateException(
+                    String.format(
+                        "Table %s is no longer visible", tableConfig.getKeyspaceAndTable())));
+  }
+
+  private static String addColumnCql(TableConfig tableConfig, CqlIdentifier column, DataType type) {
+    return CqlDdl.addColumn(tableConfig.getKeyspace(), tableConfig.getTable(), column, type);
+  }
+
+  /** Mapped columns missing from the table, ignoring the ttl and timestamp pseudo-columns. */
+  static List<Map.Entry<CqlIdentifier, CqlIdentifier>> missingColumns(
+      TableMetadata table, Map<CqlIdentifier, CqlIdentifier> mapping) {
+    return mapping
+        .entrySet()
+        .stream()
+        .filter(e -> !SinkUtil.isTtlMappingColumn(e.getKey()))
+        .filter(e -> !SinkUtil.isTimestampMappingColumn(e.getKey()))
+        .filter(e -> !table.getColumn(e.getKey()).isPresent())
+        .collect(Collectors.toList());
+  }
+
+  static boolean isKeySourced(CqlIdentifier source) {
     String name = source.asInternal();
     return name.equals(KEY) || name.startsWith(KEY + '.');
   }
@@ -252,17 +337,11 @@ public class DdlSchemaReconciler implements SchemaReconciler {
         continue;
       }
       String source = entry.getValue().asInternal();
+      DataType type = explicitColumnType(tableConfig, record, source);
       if (source.startsWith(KEY + '.')) {
-        partitionKey.put(column, fieldType(record.keySchema(), KEY, source));
-      } else if (source.startsWith(VALUE + '.')) {
-        columns.put(column, fieldType(record.valueSchema(), VALUE, source));
-      } else if (source.equals(NOW_FUNCTION)) {
-        columns.put(column, DataTypes.TIMEUUID);
+        partitionKey.put(column, type);
       } else {
-        throw new SchemaMismatchException(
-            String.format(
-                "Cannot derive a column type for %s to create table %s; create the table manually",
-                source, tableConfig.getKeyspaceAndTable()));
+        columns.put(column, type);
       }
     }
     if (partitionKey.isEmpty()) {
@@ -272,6 +351,23 @@ public class DdlSchemaReconciler implements SchemaReconciler {
               tableConfig.getKeyspaceAndTable()));
     }
     createTable(tableConfig, partitionKey, columns);
+  }
+
+  private static DataType explicitColumnType(
+      TableConfig tableConfig, AbstractSinkRecord record, String source) {
+    if (source.startsWith(KEY + '.')) {
+      return fieldType(record.keySchema(), KEY, source);
+    }
+    if (source.startsWith(VALUE + '.')) {
+      return fieldType(record.valueSchema(), VALUE, source);
+    }
+    if (source.equals(NOW_FUNCTION)) {
+      return DataTypes.TIMEUUID;
+    }
+    throw new SchemaMismatchException(
+        String.format(
+            "Cannot derive a column type for %s in table %s; define the column manually",
+            source, tableConfig.getKeyspaceAndTable()));
   }
 
   private void createTable(
@@ -294,21 +390,26 @@ public class DdlSchemaReconciler implements SchemaReconciler {
     try {
       session.execute(SimpleStatement.newInstance(cql));
     } catch (UnauthorizedException e) {
-      throw new FatalSchemaException(
-          String.format(
-              "Not authorized to run %s on %s: %s",
-              kind, tableConfig.getKeyspaceAndTable(), e.getMessage()),
-          e);
+      throw notAuthorized(kind, tableConfig, e);
     }
     session.checkSchemaAgreement();
     session.refreshSchema();
+  }
+
+  private static FatalSchemaException notAuthorized(
+      String kind, TableConfig tableConfig, UnauthorizedException e) {
+    return new FatalSchemaException(
+        String.format(
+            "Not authorized to run %s on %s: %s",
+            kind, tableConfig.getKeyspaceAndTable(), e.getMessage()),
+        e);
   }
 
   private static DataType fieldType(AbstractSchema schema, String part, String source) {
     if (schema == null) {
       throw new SchemaMismatchException(
           String.format(
-              "Creating a table needs a structured schema on the record %s (mapped from %s)",
+              "Deriving a column type needs a structured schema on the record %s (mapped from %s)",
               part, source));
     }
     String field = source.substring(part.length() + 1);
@@ -324,23 +425,45 @@ public class DdlSchemaReconciler implements SchemaReconciler {
     return CqlTypeMapper.toCql(fieldSchema.schema());
   }
 
-  private static Object identity(AbstractSchema schema) {
-    return schema == null ? null : schema.schemaIdentity();
-  }
-
+  /** Immutable, insertion-ordered mappers of the most recent schema versions. */
   private static final class Resolved {
-    private final Object keyId;
-    private final Object valueId;
-    private final RecordMapper mapper;
+    private final Object[] keyIds;
+    private final Object[] valueIds;
+    private final RecordMapper[] mappers;
 
-    private Resolved(Object keyId, Object valueId, RecordMapper mapper) {
-      this.keyId = keyId;
-      this.valueId = valueId;
-      this.mapper = mapper;
+    private Resolved(Object[] keyIds, Object[] valueIds, RecordMapper[] mappers) {
+      this.keyIds = keyIds;
+      this.valueIds = valueIds;
+      this.mappers = mappers;
     }
 
-    private boolean matches(Object keyId, Object valueId) {
-      return this.keyId == keyId && this.valueId == valueId;
+    private static RecordMapper find(Resolved resolved, Object keyId, Object valueId) {
+      if (resolved != null) {
+        for (int i = resolved.mappers.length - 1; i >= 0; i--) {
+          if (resolved.keyIds[i] == keyId && resolved.valueIds[i] == valueId) {
+            return resolved.mappers[i];
+          }
+        }
+      }
+      return null;
+    }
+
+    private static Resolved append(
+        Resolved previous, Object keyId, Object valueId, RecordMapper mapper) {
+      int kept = previous == null ? 0 : Math.min(previous.mappers.length, MAX_CACHED_VERSIONS - 1);
+      Object[] keyIds = new Object[kept + 1];
+      Object[] valueIds = new Object[kept + 1];
+      RecordMapper[] mappers = new RecordMapper[kept + 1];
+      if (kept > 0) {
+        int from = previous.mappers.length - kept;
+        System.arraycopy(previous.keyIds, from, keyIds, 0, kept);
+        System.arraycopy(previous.valueIds, from, valueIds, 0, kept);
+        System.arraycopy(previous.mappers, from, mappers, 0, kept);
+      }
+      keyIds[kept] = keyId;
+      valueIds[kept] = valueId;
+      mappers[kept] = mapper;
+      return new Resolved(keyIds, valueIds, mappers);
     }
   }
 }

@@ -592,14 +592,28 @@ public class LifeCycleManager {
     }
   }
 
-  /** True for implicit bindings, or with createTable when only the table is missing. */
+  /** True for implicit bindings, a missing table or (evolveTable) missing value columns. */
   @VisibleForTesting
   static boolean isPendingTable(
       CqlSession session, CassandraSinkConfig config, TableConfig tableConfig) {
-    return tableConfig.isImplicit()
-        || config.isCreateTable()
-            && session.getMetadata().getKeyspace(tableConfig.getKeyspace()).isPresent()
-            && !findTableMetadata(session, tableConfig).isPresent();
+    if (tableConfig.isImplicit()) {
+      return true;
+    }
+    if (!config.isCreateTable() && !config.isEvolveTable()
+        || !session.getMetadata().getKeyspace(tableConfig.getKeyspace()).isPresent()) {
+      return false;
+    }
+    Optional<TableMetadata> table = findTableMetadata(session, tableConfig);
+    if (!table.isPresent()) {
+      return config.isCreateTable();
+    }
+    if (!config.isEvolveTable() || tableConfig.isQueryProvided()) {
+      return false;
+    }
+    List<Map.Entry<CqlIdentifier, CqlIdentifier>> missing =
+        DdlSchemaReconciler.missingColumns(table.get(), tableConfig.getMapping());
+    return !missing.isEmpty()
+        && missing.stream().noneMatch(e -> DdlSchemaReconciler.isKeySourced(e.getValue()));
   }
 
   static ConvertingCodecFactory codecFactory(TopicConfig topicConfig) {

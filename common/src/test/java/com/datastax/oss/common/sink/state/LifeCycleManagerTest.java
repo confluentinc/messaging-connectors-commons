@@ -418,6 +418,26 @@ class LifeCycleManagerTest {
     assertThat(LifeCycleManager.isPendingTable(session, on, missing)).isFalse();
   }
 
+  @Test
+  void should_leave_binding_with_missing_value_column_pending_only_when_evolve_on() {
+    TableConfig missingValue =
+        makeTableConfig("ks", "mytable", String.format("%s=key.f1, nocol=value.f3", C1));
+    TableConfig missingKey =
+        makeTableConfig("ks", "mytable", String.format("%s=key.f1, nocol=key.f3", C1));
+    Map<String, String> props = baseProps();
+    CassandraSinkConfig off = new CassandraSinkConfig(props);
+    props.put("evolveTable", "true");
+    CassandraSinkConfig on = new CassandraSinkConfig(props);
+
+    assertThat(LifeCycleManager.isPendingTable(session, on, missingValue)).isTrue();
+    assertThat(LifeCycleManager.isPendingTable(session, off, missingValue)).isFalse();
+    assertThat(LifeCycleManager.isPendingTable(session, on, missingKey)).isFalse();
+    assertThat(
+            LifeCycleManager.isPendingTable(
+                session, on, makeTableConfig("ks", "mytable", C1 + "=key.f1")))
+        .isFalse();
+  }
+
   private static Map<String, String> implicitProps(String keyspace) {
     Map<String, String> props = new java.util.HashMap<>();
     props.put("contactPoints", "127.0.0.1");

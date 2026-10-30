@@ -22,6 +22,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -156,6 +158,29 @@ class InstanceStateTest {
                   .getSchemaReconciler())
           .containsInstanceOf(DdlSchemaReconciler.class);
     }
+  }
+
+  @Test
+  void should_resolve_known_implicit_topic_without_config_lookups() {
+    CassandraSinkConfig sinkConfig =
+        spy(
+            new CassandraSinkConfig(
+                ImmutableMap.of(
+                    "name",
+                    "inst",
+                    "topics.regex",
+                    "orders.*",
+                    "mappingMode",
+                    "IMPLICIT",
+                    "keyspace",
+                    "shop")));
+    InstanceState state =
+        new InstanceState(sinkConfig, session, new HashMap<>(), new MetricRegistry());
+    TopicConfig first = state.getTopicConfig("orders");
+
+    assertThat(state.getTopicConfig("orders")).isSameAs(first);
+    verify(sinkConfig, times(1)).getMappingMode();
+    verify(sinkConfig, times(1)).getTopicConfigs();
   }
 
   @Test

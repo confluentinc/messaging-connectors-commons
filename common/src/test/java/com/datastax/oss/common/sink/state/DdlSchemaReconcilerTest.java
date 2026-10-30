@@ -30,6 +30,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.slf4j.event.Level.WARN;
 
 import com.codahale.metrics.MetricRegistry;
 import com.datastax.oss.common.sink.AbstractSchema;
@@ -49,8 +50,13 @@ import com.datastax.oss.driver.api.core.metadata.Metadata;
 import com.datastax.oss.driver.api.core.metadata.schema.ColumnMetadata;
 import com.datastax.oss.driver.api.core.metadata.schema.KeyspaceMetadata;
 import com.datastax.oss.driver.api.core.metadata.schema.TableMetadata;
+import com.datastax.oss.driver.api.core.servererrors.InvalidQueryException;
 import com.datastax.oss.driver.api.core.servererrors.UnauthorizedException;
+import com.datastax.oss.driver.api.core.type.DataType;
 import com.datastax.oss.driver.api.core.type.DataTypes;
+import com.datastax.oss.dsbulk.tests.logging.LogCapture;
+import com.datastax.oss.dsbulk.tests.logging.LogInterceptingExtension;
+import com.datastax.oss.dsbulk.tests.logging.LogInterceptor;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -59,26 +65,36 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+@ExtendWith(LogInterceptingExtension.class)
 class DdlSchemaReconcilerTest {
   private static final String TOPIC = "orders-topic";
   private static final CqlIdentifier ORDERS = CqlIdentifier.fromInternal("orders");
   private static final String TIMESTAMP = "org.apache.kafka.connect.data.Timestamp";
+  private static final Pattern ALTER =
+      Pattern.compile("ALTER TABLE shop\\.orders ADD (\\w+) (\\w+)");
 
   private final CqlSession session = mock(CqlSession.class);
   private final CassandraSinkConfig config = mock(CassandraSinkConfig.class);
   private final KeyspaceMetadata keyspace = mock(KeyspaceMetadata.class);
   private final TableMetadata table = mock(TableMetadata.class);
+  private final Metadata metadata = mock(Metadata.class);
+  private final Map<CqlIdentifier, ColumnMetadata> serverColumns = new ConcurrentHashMap<>();
+  private final Map<CqlIdentifier, ColumnMetadata> visibleColumns = new ConcurrentHashMap<>();
   private final AbstractSchema keySchema = struct("id", prim(AbstractSchema.Type.INT64, null));
   private final AbstractSchema valueSchema =
       struct(
@@ -92,7 +108,6 @@ class DdlSchemaReconcilerTest {
 
   @BeforeEach
   void setUp() {
-    Metadata metadata = mock(Metadata.class);
     when(session.getMetadata()).thenReturn(metadata);
     when(metadata.getKeyspace(CqlIdentifier.fromInternal("shop")))
         .thenReturn(Optional.of(keyspace));
@@ -145,6 +160,8 @@ class DdlSchemaReconcilerTest {
     when(record.topic()).thenReturn(TOPIC);
     when(record.keySchema()).thenReturn(key);
     when(record.valueSchema()).thenReturn(value);
+    when(record.keySchemaIdentity()).thenReturn(key == null ? null : key.schemaIdentity());
+    when(record.valueSchemaIdentity()).thenReturn(value == null ? null : value.schemaIdentity());
     when(record.value()).thenReturn(new Object());
     return record;
   }
@@ -484,5 +501,290 @@ class DdlSchemaReconcilerTest {
         .hasMessageContaining("tenant")
         .satisfies(e -> assertThat(e.getMessage()).doesNotContain("ALTER TABLE"));
     verify(session, never()).execute(any(Statement.class));
+  }
+
+  private static ColumnMetadata column(CqlIdentifier name, DataType type) {
+    ColumnMetadata col = mock(ColumnMetadata.class);
+    when(col.getName()).thenReturn(name);
+    when(col.getType()).thenReturn(type);
+    return col;
+  }
+
+  /** ALTER adds a column on the server; refreshSchema makes it visible in the table metadata. */
+  private void evolvingTable(String... names) {
+    when(config.isEvolveTable()).thenReturn(true);
+    when(session.checkSchemaAgreement()).thenReturn(true);
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    for (String name : names) {
+      CqlIdentifier ident = CqlIdentifier.fromInternal(name);
+      when(table.getColumn(ident)).thenAnswer(i -> Optional.ofNullable(visibleColumns.get(ident)));
+    }
+    when(session.execute(any(Statement.class)))
+        .thenAnswer(
+            i -> {
+              Matcher m = ALTER.matcher(((SimpleStatement) i.getArgument(0)).getQuery());
+              if (m.matches()) {
+                CqlIdentifier ident = CqlIdentifier.fromInternal(m.group(1));
+                DataType type = m.group(2).equals("int") ? DataTypes.INT : DataTypes.TEXT;
+                if (serverColumns.putIfAbsent(ident, column(ident, type)) != null) {
+                  throw new InvalidQueryException(
+                      null,
+                      "Invalid column name "
+                          + m.group(1)
+                          + " because it conflicts with an existing column");
+                }
+              }
+              return null;
+            });
+    when(session.refreshSchema())
+        .thenAnswer(
+            i -> {
+              visibleColumns.putAll(serverColumns);
+              return metadata;
+            });
+  }
+
+  private static AbstractSchema valueWith(Object... extraFields) {
+    Object[] pairs = new Object[4 + extraFields.length];
+    pairs[0] = "name";
+    pairs[1] = prim(AbstractSchema.Type.STRING, null);
+    pairs[2] = "ts";
+    pairs[3] = prim(AbstractSchema.Type.INT64, TIMESTAMP);
+    System.arraycopy(extraFields, 0, pairs, 4, extraFields.length);
+    return struct(pairs);
+  }
+
+  private static String alterQuery(Statement<?> statement) {
+    return ((SimpleStatement) statement).getQuery();
+  }
+
+  @Test
+  void should_add_new_value_field_with_one_alter_per_column() {
+    evolvingTable("email", "age");
+    TableConfig tableConfig = implicitPending("orders");
+    DdlSchemaReconciler reconciler = reconciler();
+    RecordMapper first = reconciler.mapperFor(tableConfig, record(keySchema, valueSchema));
+
+    AbstractSchema v2 =
+        valueWith(
+            "email",
+            prim(AbstractSchema.Type.STRING, null),
+            "age",
+            prim(AbstractSchema.Type.INT32, null));
+    RecordMapper second = reconciler.mapperFor(tableConfig, record(keySchema, v2));
+
+    ArgumentCaptor<Statement> stmt = ArgumentCaptor.forClass(Statement.class);
+    InOrder order = inOrder(session);
+    order.verify(session, times(2)).execute(stmt.capture());
+    order.verify(session).checkSchemaAgreement();
+    order
+        .verify(session)
+        .prepareAsync(startsWith("INSERT INTO shop.orders(id,name,ts,email,age) VALUES"));
+    assertThat(stmt.getAllValues())
+        .extracting(DdlSchemaReconcilerTest::alterQuery)
+        .containsExactly(
+            "ALTER TABLE shop.orders ADD email text", "ALTER TABLE shop.orders ADD age int");
+    assertThat(second).isNotSameAs(first).isSameAs(state.getRecordMapper(tableConfig));
+  }
+
+  @Test
+  void should_treat_already_exists_as_success_and_reread_metadata() {
+    evolvingTable("email");
+    serverColumns.put(
+        CqlIdentifier.fromInternal("email"),
+        column(CqlIdentifier.fromInternal("email"), DataTypes.TEXT));
+    TableConfig tableConfig = implicitPending("orders");
+
+    RecordMapper mapper =
+        reconciler()
+            .mapperFor(
+                tableConfig,
+                record(keySchema, valueWith("email", prim(AbstractSchema.Type.STRING, null))));
+
+    verify(session, times(1)).execute(any(Statement.class));
+    verify(session, atLeastOnce()).refreshSchema();
+    verify(session).prepareAsync(startsWith("INSERT INTO shop.orders(id,name,ts,email) VALUES"));
+    assertThat(mapper).isNotNull().isSameAs(state.getRecordMapper(tableConfig));
+  }
+
+  @Test
+  void should_fail_record_on_type_conflict() {
+    evolvingTable("age");
+    serverColumns.put(
+        CqlIdentifier.fromInternal("age"),
+        column(CqlIdentifier.fromInternal("age"), DataTypes.TEXT));
+    TableConfig tableConfig = implicitPending("orders");
+
+    assertThatThrownBy(
+            () ->
+                reconciler()
+                    .mapperFor(
+                        tableConfig,
+                        record(keySchema, valueWith("age", prim(AbstractSchema.Type.INT32, null)))))
+        .isInstanceOf(SchemaMismatchException.class)
+        .hasMessageContaining("age")
+        .hasMessageContaining("has type text");
+    verify(session, never()).prepareAsync(anyString());
+  }
+
+  @Test
+  void should_rethrow_alter_error_when_column_did_not_appear() {
+    evolvingTable("email");
+    when(session.execute(any(Statement.class)))
+        .thenThrow(new InvalidQueryException(null, "some other problem"));
+    TableConfig tableConfig = implicitPending("orders");
+
+    assertThatThrownBy(
+            () ->
+                reconciler()
+                    .mapperFor(
+                        tableConfig,
+                        record(
+                            keySchema, valueWith("email", prim(AbstractSchema.Type.STRING, null)))))
+        .isInstanceOf(InvalidQueryException.class)
+        .hasMessage("some other problem");
+    verify(session, never()).prepareAsync(anyString());
+  }
+
+  @Test
+  void should_be_fatal_on_unauthorized_alter() {
+    evolvingTable("email");
+    when(session.execute(any(Statement.class)))
+        .thenThrow(new UnauthorizedException(null, "no permission"));
+    TableConfig tableConfig = implicitPending("orders");
+
+    assertThatThrownBy(
+            () ->
+                reconciler()
+                    .mapperFor(
+                        tableConfig,
+                        record(
+                            keySchema, valueWith("email", prim(AbstractSchema.Type.STRING, null)))))
+        .isInstanceOf(FatalSchemaException.class)
+        .hasMessageContaining("ALTER TABLE on shop.orders");
+  }
+
+  @Test
+  void should_issue_single_alter_under_concurrency() throws Exception {
+    evolvingTable("email");
+    TableConfig tableConfig = implicitPending("orders");
+    DdlSchemaReconciler reconciler = reconciler();
+    executor = Executors.newFixedThreadPool(2);
+    CountDownLatch start = new CountDownLatch(1);
+    List<Future<RecordMapper>> results = new ArrayList<>();
+    for (int i = 0; i < 2; i++) {
+      // Each task has its own, equal schema instance.
+      AbstractSinkRecord record =
+          record(keySchema, valueWith("email", prim(AbstractSchema.Type.STRING, null)));
+      results.add(
+          executor.submit(
+              () -> {
+                start.await();
+                return reconciler.mapperFor(tableConfig, record);
+              }));
+    }
+    start.countDown();
+
+    for (Future<RecordMapper> result : results) {
+      assertThat(result.get(10, TimeUnit.SECONDS)).isNotNull();
+    }
+    ArgumentCaptor<Statement> stmt = ArgumentCaptor.forClass(Statement.class);
+    verify(session, times(1)).execute(stmt.capture());
+    assertThat(alterQuery(stmt.getValue())).isEqualTo("ALTER TABLE shop.orders ADD email text");
+  }
+
+  @Test
+  void explicit_mode_adds_mapped_but_missing_column_when_evolve_on() {
+    evolvingTable("email");
+    TableConfig tableConfig = pending("id=key.id, name=value.name, email=value.email");
+
+    RecordMapper mapper =
+        reconciler()
+            .mapperFor(
+                tableConfig,
+                record(keySchema, valueWith("email", prim(AbstractSchema.Type.STRING, null))));
+
+    ArgumentCaptor<Statement> stmt = ArgumentCaptor.forClass(Statement.class);
+    verify(session).execute(stmt.capture());
+    assertThat(alterQuery(stmt.getValue())).isEqualTo("ALTER TABLE shop.orders ADD email text");
+    verify(session).prepareAsync(startsWith("INSERT INTO shop.orders(id,name,email) VALUES"));
+    assertThat(mapper).isNotNull().isSameAs(state.getRecordMapper(tableConfig));
+  }
+
+  @Test
+  void should_never_alter_key_column_when_evolve_on() {
+    evolvingTable("tenant");
+    TableConfig tableConfig = implicitPending("orders");
+    AbstractSchema key = struct("tenant", prim(AbstractSchema.Type.STRING, null));
+
+    assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(key, valueSchema)))
+        .isInstanceOf(SchemaMismatchException.class)
+        .hasMessageContaining("primary key of table shop.orders does not match the record key")
+        .satisfies(e -> assertThat(e.getMessage()).doesNotContain("ALTER TABLE"));
+    verify(session, never()).execute(any(Statement.class));
+  }
+
+  @Test
+  void should_warn_and_continue_without_schema_agreement(
+      @LogCapture(level = WARN, value = DdlSchemaReconciler.class) LogInterceptor logs) {
+    evolvingTable("email");
+    when(session.checkSchemaAgreement()).thenReturn(false);
+    TableConfig tableConfig = implicitPending("orders");
+
+    RecordMapper mapper =
+        reconciler()
+            .mapperFor(
+                tableConfig,
+                record(keySchema, valueWith("email", prim(AbstractSchema.Type.STRING, null))));
+
+    assertThat(mapper).isNotNull();
+    assertThat(logs.getLoggedMessages())
+        .contains("Schema agreement not reached after altering table shop.orders");
+  }
+
+  @Test
+  void should_reuse_mappers_when_alternating_between_schema_versions() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    TableConfig tableConfig = implicitPending("orders");
+    DdlSchemaReconciler reconciler = reconciler();
+    AbstractSchema v2 = struct("name", prim(AbstractSchema.Type.STRING, null));
+
+    RecordMapper m1 = reconciler.mapperFor(tableConfig, record(keySchema, valueSchema));
+    RecordMapper m2 = reconciler.mapperFor(tableConfig, record(keySchema, v2));
+
+    assertThat(reconciler.mapperFor(tableConfig, record(keySchema, valueSchema))).isSameAs(m1);
+    assertThat(reconciler.mapperFor(tableConfig, record(keySchema, v2))).isSameAs(m2);
+    verify(session, times(2)).prepareAsync(startsWith("INSERT"));
+  }
+
+  @Test
+  void should_evict_oldest_schema_version_beyond_cache_capacity() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    TableConfig tableConfig = implicitPending("orders");
+    DdlSchemaReconciler reconciler = reconciler();
+    List<AbstractSchema> versions = new ArrayList<>();
+    for (int i = 0; i < 9; i++) {
+      versions.add(struct("name", prim(AbstractSchema.Type.STRING, null)));
+      reconciler.mapperFor(tableConfig, record(keySchema, versions.get(i)));
+    }
+
+    reconciler.mapperFor(tableConfig, record(keySchema, versions.get(8)));
+    verify(session, times(9)).prepareAsync(startsWith("INSERT"));
+    reconciler.mapperFor(tableConfig, record(keySchema, versions.get(0)));
+    verify(session, times(10)).prepareAsync(startsWith("INSERT"));
+  }
+
+  @Test
+  void should_not_build_schema_wrappers_on_fast_path() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    TableConfig tableConfig = implicitPending("orders");
+    DdlSchemaReconciler reconciler = reconciler();
+    reconciler.mapperFor(tableConfig, record(keySchema, valueSchema));
+    AbstractSinkRecord second = record(keySchema, valueSchema);
+
+    reconciler.mapperFor(tableConfig, second);
+
+    verify(second, never()).keySchema();
+    verify(second, never()).valueSchema();
   }
 }

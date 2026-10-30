@@ -65,6 +65,7 @@ public class InstanceState {
   private final JmxReporter reporter;
   private final GlobalSinkMetrics globalSinkMetrics;
   private final Optional<SchemaReconciler> schemaReconciler;
+  private final boolean implicitMapping;
 
   public InstanceState(
       @NonNull CassandraSinkConfig config,
@@ -107,11 +108,10 @@ public class InstanceState {
     if (config.getJmx()) {
       reporter.start();
     }
+    implicitMapping = config.getMappingMode() == MappingMode.IMPLICIT;
     // createKeyspace alone is handled at startup.
     schemaReconciler =
-        config.isCreateTable()
-                || config.isEvolveTable()
-                || config.getMappingMode() == MappingMode.IMPLICIT
+        config.isCreateTable() || config.isEvolveTable() || implicitMapping
             ? Optional.of(new DdlSchemaReconciler(session, config, this))
             : Optional.empty();
   }
@@ -164,8 +164,11 @@ public class InstanceState {
 
   @NonNull
   public TopicConfig getTopicConfig(String topicName) {
-    TopicConfig topicConfig = this.config.getTopicConfigs().get(topicName);
-    if (topicConfig == null && config.getMappingMode() == MappingMode.IMPLICIT) {
+    TopicConfig topicConfig = implicitMapping ? implicitTopics.get(topicName) : null;
+    if (topicConfig == null) {
+      topicConfig = this.config.getTopicConfigs().get(topicName);
+    }
+    if (topicConfig == null && implicitMapping) {
       topicConfig = implicitTopics.computeIfAbsent(topicName, this::addImplicitTopic);
     }
     if (topicConfig == null) {
