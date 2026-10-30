@@ -22,6 +22,7 @@ import com.datastax.oss.common.sink.AbstractSinkTask;
 import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.common.sink.RecordMapper;
 import com.datastax.oss.common.sink.config.CassandraSinkConfig;
+import com.datastax.oss.common.sink.config.MappingMode;
 import com.datastax.oss.common.sink.config.TableConfig;
 import com.datastax.oss.common.sink.config.TopicConfig;
 import com.datastax.oss.common.sink.metrics.GlobalSinkMetrics;
@@ -35,6 +36,7 @@ import com.datastax.oss.driver.shaded.guava.common.collect.Sets;
 import com.datastax.oss.driver.shaded.guava.common.util.concurrent.ThreadFactoryBuilder;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -58,6 +60,7 @@ public class InstanceState {
   private final Executor mappingExecutor;
   private final JmxReporter reporter;
   private final GlobalSinkMetrics globalSinkMetrics;
+  private final Optional<SchemaReconciler> schemaReconciler;
 
   public InstanceState(
       @NonNull CassandraSinkConfig config,
@@ -99,6 +102,13 @@ public class InstanceState {
     if (config.getJmx()) {
       reporter.start();
     }
+    // createKeyspace alone is handled at startup.
+    schemaReconciler =
+        config.isCreateTable()
+                || config.isEvolveTable()
+                || config.getMappingMode() == MappingMode.IMPLICIT
+            ? Optional.of(new DdlSchemaReconciler(session, config, this))
+            : Optional.empty();
   }
 
   void registerTask(AbstractSinkTask task) {
@@ -217,6 +227,12 @@ public class InstanceState {
     return getTopicState(tableConfig.getTopicName()).getRecordMapper(tableConfig);
   }
 
+  /** Empty when no table reconciliation is configured; records then use the prepared mapper. */
+  @NonNull
+  public Optional<SchemaReconciler> getSchemaReconciler() {
+    return schemaReconciler;
+  }
+
   public void incrementRecordCounter(String topicName, String keyspaceAndTable, int incrementBy) {
     getTopicState(topicName).incrementRecordCount(keyspaceAndTable, incrementBy);
   }
@@ -245,7 +261,7 @@ public class InstanceState {
   }
 
   @NonNull
-  private TopicState getTopicState(String topicName) {
+  TopicState getTopicState(String topicName) {
     TopicState topicState = topicStates.get(topicName);
     if (topicState == null) {
       throw new ConfigException(

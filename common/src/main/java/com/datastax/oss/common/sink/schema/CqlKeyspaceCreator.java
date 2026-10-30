@@ -33,10 +33,7 @@ public class CqlKeyspaceCreator implements KeyspaceCreator {
     if (session.getMetadata().getKeyspace(keyspace).isPresent()) {
       return;
     }
-    String cql =
-        String.format(
-            "CREATE KEYSPACE IF NOT EXISTS %s WITH replication={'class':'SimpleStrategy','replication_factor':%d}",
-            keyspace.asCql(true), replicationFactor);
+    String cql = CqlDdl.createKeyspace(keyspace, replicationFactor);
     try {
       session.execute(SimpleStatement.newInstance(cql));
     } catch (UnauthorizedException e) {

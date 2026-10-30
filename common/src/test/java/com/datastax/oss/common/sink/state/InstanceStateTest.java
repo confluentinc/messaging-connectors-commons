@@ -16,16 +16,22 @@
 package com.datastax.oss.common.sink.state;
 
 import static com.datastax.oss.common.sink.config.TableConfig.MAPPING_OPT;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.codahale.metrics.MetricRegistry;
 import com.datastax.oss.common.sink.config.CassandraSinkConfig;
+import com.datastax.oss.common.sink.config.MappingMode;
 import com.datastax.oss.common.sink.config.TableConfig;
 import com.datastax.oss.common.sink.config.TableConfigBuilder;
 import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.cql.Statement;
 import com.datastax.oss.driver.shaded.guava.common.collect.ImmutableList;
 import com.datastax.oss.driver.shaded.guava.common.collect.ImmutableMap;
 import java.util.HashMap;
@@ -104,5 +110,43 @@ class InstanceStateTest {
 
     // then metrics should not reset
     assertEquals(instanceState2.getRecordCounter("t1", "ks.tb"), 1);
+  }
+
+  @Test
+  void pass_through_is_used_when_all_flags_off() {
+    CassandraSinkConfig sinkConfig = new CassandraSinkConfig(ImmutableMap.of("name", "inst"));
+    InstanceState state = new InstanceState(sinkConfig, session, topicStates, new MetricRegistry());
+
+    assertThat(state.getSchemaReconciler()).isEmpty();
+    verify(session, never()).execute(any(Statement.class));
+    verify(session, never()).getMetadata();
+  }
+
+  @Test
+  void pass_through_is_used_when_only_create_keyspace_on() {
+    when(config.isCreateKeyspace()).thenReturn(true);
+    when(config.isSchemaManagementEnabled()).thenReturn(true);
+
+    assertThat(
+            new InstanceState(config, session, topicStates, new MetricRegistry())
+                .getSchemaReconciler())
+        .isEmpty();
+  }
+
+  @Test
+  void ddl_reconciler_is_used_when_create_table_evolve_table_or_implicit() {
+    CassandraSinkConfig createTable = mock(CassandraSinkConfig.class);
+    when(createTable.isCreateTable()).thenReturn(true);
+    CassandraSinkConfig evolveTable = mock(CassandraSinkConfig.class);
+    when(evolveTable.isEvolveTable()).thenReturn(true);
+    CassandraSinkConfig implicit = mock(CassandraSinkConfig.class);
+    when(implicit.getMappingMode()).thenReturn(MappingMode.IMPLICIT);
+
+    for (CassandraSinkConfig c : ImmutableList.of(createTable, evolveTable, implicit)) {
+      assertThat(
+              new InstanceState(c, session, topicStates, new MetricRegistry())
+                  .getSchemaReconciler())
+          .containsInstanceOf(DdlSchemaReconciler.class);
+    }
   }
 }

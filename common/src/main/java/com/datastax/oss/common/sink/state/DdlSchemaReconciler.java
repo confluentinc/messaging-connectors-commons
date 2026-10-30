@@ -1,0 +1,216 @@
+/*
+ * Copyright DataStax, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.datastax.oss.common.sink.state;
+
+import com.datastax.oss.common.sink.AbstractField;
+import com.datastax.oss.common.sink.AbstractSchema;
+import com.datastax.oss.common.sink.AbstractSinkRecord;
+import com.datastax.oss.common.sink.RecordMapper;
+import com.datastax.oss.common.sink.config.CassandraSinkConfig;
+import com.datastax.oss.common.sink.config.TableConfig;
+import com.datastax.oss.common.sink.record.RawData;
+import com.datastax.oss.common.sink.schema.CqlDdl;
+import com.datastax.oss.common.sink.schema.CqlTypeMapper;
+import com.datastax.oss.common.sink.schema.FatalSchemaException;
+import com.datastax.oss.common.sink.schema.SchemaMismatchException;
+import com.datastax.oss.common.sink.util.SinkUtil;
+import com.datastax.oss.driver.api.core.CqlIdentifier;
+import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.cql.SimpleStatement;
+import com.datastax.oss.driver.api.core.metadata.schema.ColumnMetadata;
+import com.datastax.oss.driver.api.core.metadata.schema.TableMetadata;
+import com.datastax.oss.driver.api.core.servererrors.UnauthorizedException;
+import com.datastax.oss.driver.api.core.type.DataType;
+import com.datastax.oss.driver.api.core.type.DataTypes;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.stream.Collectors;
+
+/** Creates missing tables from the record schema before handing out the mapper. */
+public class DdlSchemaReconciler implements SchemaReconciler {
+  private static final String KEY = "key";
+  private static final String VALUE = "value";
+  private static final String NOW_FUNCTION = "now()";
+
+  private final CqlSession session;
+  private final CassandraSinkConfig config;
+  private final InstanceState state;
+  private final ConcurrentMap<TableConfig, Resolved> resolved = new ConcurrentHashMap<>();
+  private final ConcurrentMap<TableConfig, Object> locks = new ConcurrentHashMap<>();
+
+  public DdlSchemaReconciler(CqlSession session, CassandraSinkConfig config, InstanceState state) {
+    this.session = session;
+    this.config = config;
+    this.state = state;
+  }
+
+  @Override
+  public RecordMapper mapperFor(TableConfig tableConfig, AbstractSinkRecord record) {
+    Object keyId = identity(record.keySchema());
+    Object valueId = identity(record.valueSchema());
+    Resolved cached = resolved.get(tableConfig);
+    if (cached != null && cached.matches(keyId, valueId)) {
+      return cached.mapper;
+    }
+    synchronized (locks.computeIfAbsent(tableConfig, t -> new Object())) {
+      cached = resolved.get(tableConfig);
+      if (cached != null && cached.matches(keyId, valueId)) {
+        return cached.mapper;
+      }
+      RecordMapper mapper = reconcile(tableConfig, record);
+      resolved.put(tableConfig, new Resolved(keyId, valueId, mapper));
+      return mapper;
+    }
+  }
+
+  private RecordMapper reconcile(TableConfig tableConfig, AbstractSinkRecord record) {
+    RecordMapper existing = state.getRecordMapper(tableConfig);
+    if (existing != null) {
+      return existing;
+    }
+    Optional<TableMetadata> table = LifeCycleManager.findTableMetadata(session, tableConfig);
+    if (!table.isPresent()) {
+      createTable(tableConfig, record);
+      table = LifeCycleManager.findTableMetadata(session, tableConfig);
+      if (!table.isPresent()) {
+        throw new IllegalStateException(
+            String.format(
+                "Table %s is not visible after creation", tableConfig.getKeyspaceAndTable()));
+      }
+    }
+    List<CqlIdentifier> primaryKey =
+        table
+            .get()
+            .getPrimaryKey()
+            .stream()
+            .map(ColumnMetadata::getName)
+            .collect(Collectors.toList());
+    try {
+      LifeCycleManager.prepareStatementsAsync(
+              session,
+              state.getTopicState(tableConfig.getTopicName()),
+              tableConfig,
+              table.get(),
+              primaryKey,
+              tableConfig.getMapping(),
+              true)
+          .toCompletableFuture()
+          .join();
+    } catch (CompletionException e) {
+      throw e.getCause() instanceof RuntimeException ? (RuntimeException) e.getCause() : e;
+    }
+    return state.getRecordMapper(tableConfig);
+  }
+
+  private void createTable(TableConfig tableConfig, AbstractSinkRecord record) {
+    LinkedHashMap<CqlIdentifier, DataType> partitionKey = new LinkedHashMap<>();
+    LinkedHashMap<CqlIdentifier, DataType> columns = new LinkedHashMap<>();
+    for (Map.Entry<CqlIdentifier, CqlIdentifier> entry : tableConfig.getMapping().entrySet()) {
+      CqlIdentifier column = entry.getKey();
+      if (SinkUtil.isTtlMappingColumn(column) || SinkUtil.isTimestampMappingColumn(column)) {
+        continue;
+      }
+      String source = entry.getValue().asInternal();
+      if (source.startsWith(KEY + '.')) {
+        partitionKey.put(column, fieldType(record.keySchema(), KEY, source));
+      } else if (source.startsWith(VALUE + '.')) {
+        columns.put(column, fieldType(record.valueSchema(), VALUE, source));
+      } else if (source.equals(NOW_FUNCTION)) {
+        columns.put(column, DataTypes.TIMEUUID);
+      } else {
+        throw new SchemaMismatchException(
+            String.format(
+                "Cannot derive a column type for %s to create table %s; create the table manually",
+                source, tableConfig.getKeyspaceAndTable()));
+      }
+    }
+    if (partitionKey.isEmpty()) {
+      throw new SchemaMismatchException(
+          String.format(
+              "Cannot create table %s: no mapped column comes from the record key to form the primary key",
+              tableConfig.getKeyspaceAndTable()));
+    }
+    String cql =
+        CqlDdl.createTable(
+            tableConfig.getKeyspace(), tableConfig.getTable(), partitionKey, columns);
+    if (!config.isCreateTable()) {
+      throw new SchemaMismatchException(
+          String.format(
+              "Table %s does not exist; create it with: %s",
+              tableConfig.getKeyspaceAndTable(), cql));
+    }
+    execute(cql, "CREATE TABLE", tableConfig);
+  }
+
+  private void execute(String cql, String kind, TableConfig tableConfig) {
+    try {
+      session.execute(SimpleStatement.newInstance(cql));
+    } catch (UnauthorizedException e) {
+      throw new FatalSchemaException(
+          String.format(
+              "Not authorized to run %s on %s: %s",
+              kind, tableConfig.getKeyspaceAndTable(), e.getMessage()),
+          e);
+    }
+    session.checkSchemaAgreement();
+    session.refreshSchema();
+  }
+
+  private static DataType fieldType(AbstractSchema schema, String part, String source) {
+    if (schema == null) {
+      throw new SchemaMismatchException(
+          String.format(
+              "Creating a table needs a structured schema on the record %s (mapped from %s)",
+              part, source));
+    }
+    String field = source.substring(part.length() + 1);
+    if (field.equals(RawData.FIELD_NAME)) {
+      return CqlTypeMapper.toCql(schema);
+    }
+    AbstractField fieldSchema =
+        schema.type() == AbstractSchema.Type.STRUCT ? schema.field(field) : null;
+    if (fieldSchema == null) {
+      throw new SchemaMismatchException(
+          String.format("Field %s is not defined in the record %s schema", field, part));
+    }
+    return CqlTypeMapper.toCql(fieldSchema.schema());
+  }
+
+  private static Object identity(AbstractSchema schema) {
+    return schema == null ? null : schema.schemaIdentity();
+  }
+
+  private static final class Resolved {
+    private final Object keyId;
+    private final Object valueId;
+    private final RecordMapper mapper;
+
+    private Resolved(Object keyId, Object valueId, RecordMapper mapper) {
+      this.keyId = keyId;
+      this.valueId = valueId;
+      this.mapper = mapper;
+    }
+
+    private boolean matches(Object keyId, Object valueId) {
+      return this.keyId == keyId && this.valueId == valueId;
+    }
+  }
+}

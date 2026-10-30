@@ -170,8 +170,11 @@ public class LifeCycleManager {
    */
   @VisibleForTesting
   static boolean validateMappingColumns(TableMetadata table, TableConfig tableConfig) {
-    Map<CqlIdentifier, CqlIdentifier> mapping = tableConfig.getMapping();
+    return validateMappingColumns(table, tableConfig, tableConfig.getMapping());
+  }
 
+  private static boolean validateMappingColumns(
+      TableMetadata table, TableConfig tableConfig, Map<CqlIdentifier, CqlIdentifier> mapping) {
     // The columns in the mapping are the keys. Check that each exists in the table.
     String nonExistentCols =
         mapping
@@ -221,7 +224,12 @@ public class LifeCycleManager {
   @VisibleForTesting
   @NonNull
   static String makeInsertStatement(TableConfig config) {
-    Map<CqlIdentifier, CqlIdentifier> mapping = config.getMapping();
+    return makeInsertStatement(config, config.getMapping());
+  }
+
+  @NonNull
+  private static String makeInsertStatement(
+      TableConfig config, Map<CqlIdentifier, CqlIdentifier> mapping) {
     StringBuilder statementBuilder = new StringBuilder("INSERT INTO ");
     statementBuilder
         .append(config.getKeyspace().asCql(true))
@@ -274,6 +282,12 @@ public class LifeCycleManager {
   @VisibleForTesting
   @NonNull
   static String makeUpdateCounterStatement(TableConfig config, TableMetadata table) {
+    return makeUpdateCounterStatement(config, table, config.getMapping());
+  }
+
+  @NonNull
+  private static String makeUpdateCounterStatement(
+      TableConfig config, TableMetadata table, Map<CqlIdentifier, CqlIdentifier> mapping) {
     if (config.getTtl() != -1 || config.hasTtlMappingColumn()) {
       throw new ConfigException("Cannot set ttl when updating a counter table");
     }
@@ -282,7 +296,6 @@ public class LifeCycleManager {
     // UPDATE ks.table SET col1 = col1 + :col1, col2 = col2 + :col2, ...
     // WHERE pk1 = :pk1 AND pk2 = :pk2 ...
 
-    Map<CqlIdentifier, CqlIdentifier> mapping = config.getMapping();
     StringBuilder statementBuilder = new StringBuilder("UPDATE ");
     statementBuilder
         .append(config.getKeyspace().asCql(true))
@@ -377,6 +390,10 @@ public class LifeCycleManager {
   @VisibleForTesting
   @NonNull
   static TableMetadata getTableMetadata(CqlSession session, TableConfig tableConfig) {
+    Optional<TableMetadata> found = findTableMetadata(session, tableConfig);
+    if (found.isPresent()) {
+      return found.get();
+    }
     CqlIdentifier keyspaceName = tableConfig.getKeyspace();
     CqlIdentifier tableName = tableConfig.getTable();
     Metadata metadata = session.getMetadata();
@@ -407,6 +424,15 @@ public class LifeCycleManager {
       }
     }
     return table.get();
+  }
+
+  /** Returns the table's metadata, or empty if the keyspace or table does not exist. */
+  @NonNull
+  static Optional<TableMetadata> findTableMetadata(CqlSession session, TableConfig tableConfig) {
+    return session
+        .getMetadata()
+        .getKeyspace(tableConfig.getKeyspace())
+        .flatMap(ks -> ks.getTable(tableConfig.getTable()));
   }
 
   private static boolean isCounterTable(TableMetadata table) {
@@ -497,6 +523,10 @@ public class LifeCycleManager {
                       .stream()
                       .map(
                           tableConfig -> {
+                            if (isPendingTable(session, config, tableConfig)) {
+                              topicState.addPendingTable(tableConfig);
+                              return CompletableFuture.<Void>completedFuture(null);
+                            }
                             TableMetadata table = getTableMetadata(session, tableConfig);
                             // Save off the primary key of the table, if we haven't done so
                             // already.
@@ -535,6 +565,15 @@ public class LifeCycleManager {
         });
 
     return new InstanceState(config, session, topicStates, metricRegistry);
+  }
+
+  /** True when createTable is on and the table, but not its keyspace, is missing. */
+  @VisibleForTesting
+  static boolean isPendingTable(
+      CqlSession session, CassandraSinkConfig config, TableConfig tableConfig) {
+    return config.isCreateTable()
+        && session.getMetadata().getKeyspace(tableConfig.getKeyspace()).isPresent()
+        && !findTableMetadata(session, tableConfig).isPresent();
   }
 
   /**
@@ -686,15 +725,29 @@ public class LifeCycleManager {
       TableConfig tableConfig,
       TableMetadata table,
       List<CqlIdentifier> primaryKey) {
+    return prepareStatementsAsync(
+        session, topicState, tableConfig, table, primaryKey, tableConfig.getMapping(), false);
+  }
+
+  /** Prepares statements for the given mapping; replaceExisting swaps any registered mapper. */
+  @NonNull
+  static CompletionStage<Void> prepareStatementsAsync(
+      CqlSession session,
+      TopicState topicState,
+      TableConfig tableConfig,
+      TableMetadata table,
+      List<CqlIdentifier> primaryKey,
+      Map<CqlIdentifier, CqlIdentifier> mapping,
+      boolean replaceExisting) {
 
     // for custom query DELETE not supported yet
     boolean allColumnsMapped = false;
     if (!tableConfig.isQueryProvided()) {
-      allColumnsMapped = validateMappingColumns(table, tableConfig);
+      allColumnsMapped = validateMappingColumns(table, tableConfig, mapping);
       validateTtlConfig(tableConfig);
     }
 
-    String insertUpdateStatement = getInsertUpdateStatement(tableConfig, table);
+    String insertUpdateStatement = getInsertUpdateStatement(tableConfig, table, mapping);
 
     CompletionStage<? extends PreparedStatement> insertUpdateFuture =
         session.prepareAsync(insertUpdateStatement);
@@ -711,9 +764,15 @@ public class LifeCycleManager {
     return insertUpdateFuture
         .thenAcceptBoth(
             deleteFuture,
-            (preparedInsertUpdate, preparedDelete) ->
+            (preparedInsertUpdate, preparedDelete) -> {
+              if (replaceExisting) {
+                topicState.replaceRecordMapper(
+                    tableConfig, primaryKey, preparedInsertUpdate, preparedDelete, mapping);
+              } else {
                 topicState.createRecordMapper(
-                    tableConfig, primaryKey, preparedInsertUpdate, preparedDelete))
+                    tableConfig, primaryKey, preparedInsertUpdate, preparedDelete, mapping);
+              }
+            })
         .exceptionally(
             e -> {
               String statements =
@@ -726,7 +785,8 @@ public class LifeCycleManager {
   }
 
   @NonNull
-  private static String getInsertUpdateStatement(TableConfig tableConfig, TableMetadata table) {
+  private static String getInsertUpdateStatement(
+      TableConfig tableConfig, TableMetadata table, Map<CqlIdentifier, CqlIdentifier> mapping) {
     // if user provides query explicitly it has priority over any connector specific query
     // construction logic
     return tableConfig
@@ -734,8 +794,8 @@ public class LifeCycleManager {
         .orElseGet(
             () ->
                 isCounterTable(table)
-                    ? makeUpdateCounterStatement(tableConfig, table)
-                    : makeInsertStatement(tableConfig));
+                    ? makeUpdateCounterStatement(tableConfig, table, mapping)
+                    : makeInsertStatement(tableConfig, mapping));
   }
 
   private static void validateTtlConfig(TableConfig config) {

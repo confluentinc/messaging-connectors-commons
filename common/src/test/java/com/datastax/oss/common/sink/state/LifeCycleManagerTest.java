@@ -380,6 +380,44 @@ class LifeCycleManagerTest {
     verify(creator, times(1)).ensureKeyspace(session, CqlIdentifier.fromInternal("shop"));
   }
 
+  @Test
+  void should_find_table_metadata_or_empty() {
+    when(keyspace.getTable(CqlIdentifier.fromInternal("missing"))).thenReturn(Optional.empty());
+
+    assertThat(
+            LifeCycleManager.findTableMetadata(
+                session, makeTableConfig("ks", "mytable", "c1=value.f1")))
+        .contains(table);
+    assertThat(
+            LifeCycleManager.findTableMetadata(
+                session, makeTableConfig("ks", "missing", "c1=value.f1")))
+        .isEmpty();
+    when(metadata.getKeyspace(any(CqlIdentifier.class))).thenReturn(Optional.empty());
+    assertThat(
+            LifeCycleManager.findTableMetadata(
+                session, makeTableConfig("ks", "mytable", "c1=value.f1")))
+        .isEmpty();
+  }
+
+  @Test
+  void should_leave_missing_table_pending_only_when_create_table_on() {
+    TableConfig missing = makeTableConfig("ks", "missing", "c1=value.f1");
+    when(keyspace.getTable(CqlIdentifier.fromInternal("missing"))).thenReturn(Optional.empty());
+    Map<String, String> props = baseProps();
+    CassandraSinkConfig off = new CassandraSinkConfig(props);
+    props.put("createTable", "true");
+    CassandraSinkConfig on = new CassandraSinkConfig(props);
+
+    assertThat(LifeCycleManager.isPendingTable(session, on, missing)).isTrue();
+    assertThat(LifeCycleManager.isPendingTable(session, off, missing)).isFalse();
+    assertThat(
+            LifeCycleManager.isPendingTable(
+                session, on, makeTableConfig("ks", "mytable", "c1=value.f1")))
+        .isFalse();
+    when(metadata.getKeyspace(any(CqlIdentifier.class))).thenReturn(Optional.empty());
+    assertThat(LifeCycleManager.isPendingTable(session, on, missing)).isFalse();
+  }
+
   private static TableConfig makeTableConfig(
       String keyspaceName, String tableName, String mapping) {
     return makeTableConfig(keyspaceName, tableName, mapping, -1);
