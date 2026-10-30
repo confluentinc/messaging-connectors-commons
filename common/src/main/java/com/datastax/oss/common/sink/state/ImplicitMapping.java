@@ -17,10 +17,16 @@ package com.datastax.oss.common.sink.state;
 
 import com.datastax.oss.common.sink.AbstractField;
 import com.datastax.oss.common.sink.AbstractSchema;
+import com.datastax.oss.common.sink.schema.SchemaMismatchException;
 import com.datastax.oss.driver.api.core.CqlIdentifier;
+import com.datastax.oss.driver.api.core.metadata.schema.TableMetadata;
 import edu.umd.cs.findbugs.annotations.Nullable;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /** Derives a column mapping from record field names: column = field name. */
 public final class ImplicitMapping {
@@ -46,5 +52,39 @@ public final class ImplicitMapping {
           CqlIdentifier.fromInternal(field.name()),
           CqlIdentifier.fromInternal(prefix + field.name()));
     }
+  }
+
+  /** Binds each column to the table's exact column, else to its only case-insensitive match. */
+  public static Map<CqlIdentifier, CqlIdentifier> resolveColumns(
+      Map<CqlIdentifier, CqlIdentifier> mapping, TableMetadata table, String tableName) {
+    Set<CqlIdentifier> taken = new HashSet<>();
+    mapping.keySet().stream().filter(c -> table.getColumn(c).isPresent()).forEach(taken::add);
+    Map<CqlIdentifier, CqlIdentifier> resolved = new LinkedHashMap<>();
+    for (Map.Entry<CqlIdentifier, CqlIdentifier> entry : mapping.entrySet()) {
+      CqlIdentifier column = entry.getKey();
+      if (!taken.contains(column)) {
+        List<CqlIdentifier> matches =
+            table
+                .getColumns()
+                .keySet()
+                .stream()
+                .filter(c -> c.asInternal().equalsIgnoreCase(column.asInternal()))
+                .collect(Collectors.toList());
+        if (matches.size() > 1) {
+          throw new SchemaMismatchException(
+              String.format(
+                  "Field %s matches several columns of table %s ignoring case: %s",
+                  column.asInternal(),
+                  tableName,
+                  matches.stream().map(c -> c.asCql(true)).collect(Collectors.joining(", "))));
+        }
+        if (matches.size() == 1 && taken.add(matches.get(0))) {
+          resolved.put(matches.get(0), entry.getValue());
+          continue;
+        }
+      }
+      resolved.put(column, entry.getValue());
+    }
+    return resolved;
   }
 }

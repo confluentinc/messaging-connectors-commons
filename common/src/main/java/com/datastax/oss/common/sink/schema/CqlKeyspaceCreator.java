@@ -19,9 +19,13 @@ import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.cql.SimpleStatement;
 import com.datastax.oss.driver.api.core.servererrors.UnauthorizedException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Creates keyspaces with CQL, using SimpleStrategy. */
 public class CqlKeyspaceCreator implements KeyspaceCreator {
+  private static final Logger log = LoggerFactory.getLogger(CqlKeyspaceCreator.class);
+
   private final int replicationFactor;
 
   public CqlKeyspaceCreator(int replicationFactor) {
@@ -43,7 +47,9 @@ public class CqlKeyspaceCreator implements KeyspaceCreator {
               cql, keyspace.asInternal()),
           e);
     }
-    session.checkSchemaAgreement();
+    if (!session.checkSchemaAgreement()) {
+      log.warn("Schema agreement not reached after creating keyspace {}", keyspace.asInternal());
+    }
     session.refreshSchema();
   }
 }

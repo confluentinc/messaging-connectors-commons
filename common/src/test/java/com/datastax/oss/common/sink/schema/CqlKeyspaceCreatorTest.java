@@ -23,6 +23,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.slf4j.event.Level.WARN;
 
 import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.CqlSession;
@@ -31,12 +32,17 @@ import com.datastax.oss.driver.api.core.cql.Statement;
 import com.datastax.oss.driver.api.core.metadata.Metadata;
 import com.datastax.oss.driver.api.core.metadata.schema.KeyspaceMetadata;
 import com.datastax.oss.driver.api.core.servererrors.UnauthorizedException;
+import com.datastax.oss.dsbulk.tests.logging.LogCapture;
+import com.datastax.oss.dsbulk.tests.logging.LogInterceptingExtension;
+import com.datastax.oss.dsbulk.tests.logging.LogInterceptor;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+@ExtendWith(LogInterceptingExtension.class)
 class CqlKeyspaceCreatorTest {
   private static final CqlIdentifier SHOP = CqlIdentifier.fromInternal("shop");
 
@@ -85,5 +91,17 @@ class CqlKeyspaceCreatorTest {
         .isInstanceOf(FatalSchemaException.class)
         .hasMessageContaining("CREATE")
         .hasMessageContaining("shop");
+  }
+
+  @Test
+  void should_warn_without_schema_agreement(
+      @LogCapture(level = WARN, value = CqlKeyspaceCreator.class) LogInterceptor logs) {
+    when(metadata.getKeyspace(SHOP)).thenReturn(Optional.empty());
+    when(session.checkSchemaAgreement()).thenReturn(false);
+
+    new CqlKeyspaceCreator(2).ensureKeyspace(session, SHOP);
+
+    assertThat(logs.getLoggedMessages())
+        .contains("Schema agreement not reached after creating keyspace shop");
   }
 }

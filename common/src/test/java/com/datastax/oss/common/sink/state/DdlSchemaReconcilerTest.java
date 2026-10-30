@@ -640,7 +640,7 @@ class DdlSchemaReconcilerTest {
                         tableConfig,
                         record(
                             keySchema, valueWith("email", prim(AbstractSchema.Type.STRING, null)))))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(FatalSchemaException.class)
         .hasMessageContaining("ALTER TABLE shop.orders ADD email text")
         .hasCauseInstanceOf(InvalidQueryException.class);
     verify(session, never()).prepareAsync(anyString());
@@ -786,5 +786,123 @@ class DdlSchemaReconcilerTest {
 
     verify(second, never()).keySchema();
     verify(second, never()).valueSchema();
+  }
+
+  @Test
+  void should_add_missing_column_when_create_found_narrower_table() {
+    evolvingTable("ts");
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.empty(), Optional.of(table));
+    TableConfig tableConfig = pending("id=key.id, name=value.name, ts=value.ts");
+
+    RecordMapper mapper = reconciler().mapperFor(tableConfig, record(keySchema, valueSchema));
+
+    ArgumentCaptor<Statement> stmt = ArgumentCaptor.forClass(Statement.class);
+    verify(session, times(2)).execute(stmt.capture());
+    assertThat(stmt.getAllValues())
+        .extracting(DdlSchemaReconcilerTest::alterQuery)
+        .containsExactly(
+            "CREATE TABLE IF NOT EXISTS shop.orders (id bigint,name text,ts timestamp,PRIMARY KEY(id))",
+            "ALTER TABLE shop.orders ADD ts timestamp");
+    verify(session).prepareAsync(startsWith("INSERT INTO shop.orders(id,name,ts) VALUES"));
+    assertThat(mapper).isNotNull();
+  }
+
+  @Test
+  void should_report_alter_when_create_found_narrower_table_and_evolve_off() {
+    when(table.getColumn(CqlIdentifier.fromInternal("ts"))).thenReturn(Optional.empty());
+    TableConfig tableConfig = implicitPending("orders");
+
+    assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, valueSchema)))
+        .isInstanceOf(SchemaMismatchException.class)
+        .hasMessageContaining("ALTER TABLE shop.orders ADD ts timestamp");
+    verify(session, times(1)).execute(any(Statement.class));
+    verify(session, never()).prepareAsync(anyString());
+  }
+
+  @Test
+  void should_report_key_mismatch_when_create_found_table_with_other_key() {
+    TableConfig tableConfig = implicitPending("orders");
+    AbstractSchema key = struct("tenant", prim(AbstractSchema.Type.STRING, null));
+
+    assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(key, valueSchema)))
+        .isInstanceOf(SchemaMismatchException.class)
+        .hasMessageContaining("primary key of table shop.orders does not match the record key")
+        .hasMessageContaining("tenant");
+    verify(session, times(1)).execute(any(Statement.class));
+  }
+
+  @Test
+  void should_warn_without_schema_agreement_after_create(
+      @LogCapture(level = WARN, value = DdlSchemaReconciler.class) LogInterceptor logs) {
+    when(session.checkSchemaAgreement()).thenReturn(false);
+    TableConfig tableConfig = pending("id=key.id, name=value.name, ts=value.ts");
+
+    assertThat(reconciler().mapperFor(tableConfig, record(keySchema, valueSchema))).isNotNull();
+    assertThat(logs.getLoggedMessages())
+        .contains("Schema agreement not reached after creating table shop.orders");
+  }
+
+  @Test
+  void should_be_fatal_on_invalid_create() {
+    when(session.execute(any(Statement.class)))
+        .thenThrow(new InvalidQueryException(null, "too many tables"));
+    TableConfig tableConfig = implicitPending("orders");
+
+    assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, valueSchema)))
+        .isInstanceOf(FatalSchemaException.class)
+        .hasMessageContaining("CREATE TABLE on shop.orders")
+        .hasMessageContaining("too many tables")
+        .hasCauseInstanceOf(InvalidQueryException.class);
+  }
+
+  private void existingColumn(String name) {
+    CqlIdentifier ident = CqlIdentifier.fromInternal(name);
+    ColumnMetadata col = column(ident, DataTypes.TEXT);
+    table.getColumns().put(ident, col);
+    when(table.getColumn(ident)).thenReturn(Optional.of(col));
+  }
+
+  @Test
+  void should_bind_field_to_existing_column_ignoring_case() {
+    evolvingTable("userId");
+    existingColumn("userid");
+    TableConfig tableConfig = implicitPending("orders");
+
+    reconciler()
+        .mapperFor(
+            tableConfig,
+            record(keySchema, valueWith("userId", prim(AbstractSchema.Type.STRING, null))));
+
+    verify(session, never()).execute(any(Statement.class));
+    verify(session).prepareAsync(startsWith("INSERT INTO shop.orders(id,name,ts,userid) VALUES"));
+  }
+
+  @Test
+  void should_reject_field_matching_several_columns_ignoring_case() {
+    evolvingTable("userId");
+    existingColumn("userid");
+    existingColumn("USERID");
+    TableConfig tableConfig = implicitPending("orders");
+
+    assertThatThrownBy(
+            () ->
+                reconciler()
+                    .mapperFor(
+                        tableConfig,
+                        record(
+                            keySchema,
+                            valueWith("userId", prim(AbstractSchema.Type.STRING, null)))))
+        .isInstanceOf(SchemaMismatchException.class)
+        .hasMessageContaining("userid, \"USERID\"");
+    verify(session, never()).execute(any(Statement.class));
+  }
+
+  @Test
+  void should_treat_value_sources_and_now_as_evolvable() {
+    assertThat(DdlSchemaReconciler.isEvolvableSource(CqlIdentifier.fromInternal("value.__self")))
+        .isTrue();
+    assertThat(DdlSchemaReconciler.isEvolvableSource(CqlIdentifier.fromInternal("now()"))).isTrue();
+    assertThat(DdlSchemaReconciler.isEvolvableSource(CqlIdentifier.fromInternal("key.__self")))
+        .isFalse();
   }
 }

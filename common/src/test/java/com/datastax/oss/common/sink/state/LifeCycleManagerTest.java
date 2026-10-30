@@ -401,7 +401,7 @@ class LifeCycleManagerTest {
 
   @Test
   void should_leave_missing_table_pending_only_when_create_table_on() {
-    TableConfig missing = makeTableConfig("ks", "missing", "c1=value.f1");
+    TableConfig missing = makeTableConfig("ks", "missing", "c1=key.f1");
     when(keyspace.getTable(CqlIdentifier.fromInternal("missing"))).thenReturn(Optional.empty());
     Map<String, String> props = baseProps();
     CassandraSinkConfig off = new CassandraSinkConfig(props);
@@ -448,6 +448,47 @@ class LifeCycleManagerTest {
             LifeCycleManager.isPendingTable(
                 session, on, makeTableConfig("ks", "mytable", C1 + "=key.f1")))
         .isFalse();
+  }
+
+  @Test
+  void should_fail_start_when_missing_table_cannot_be_created_from_mapping() {
+    when(keyspace.getTable(CqlIdentifier.fromInternal("missing"))).thenReturn(Optional.empty());
+    Map<String, String> props = baseProps();
+    props.put("createTable", "true");
+    CassandraSinkConfig on = new CassandraSinkConfig(props);
+
+    assertThatThrownBy(
+            () ->
+                LifeCycleManager.isPendingTable(
+                    session, on, makeTableConfig("ks", "missing", "c1=value.f1, c2=now()")))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining(
+            "Cannot create table ks.missing: no mapped column comes from the record key");
+    assertThatThrownBy(
+            () ->
+                LifeCycleManager.isPendingTable(
+                    session, on, makeTableConfig("ks", "missing", "c1=key.f1, c2=header.h")))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining(
+            "Cannot derive a column type for header.h in table ks.missing; define the column manually");
+    assertThat(
+            LifeCycleManager.isPendingTable(
+                session,
+                on,
+                makeTableConfig("ks", "missing", "c1=key, c2=value.f2, c3=now(), __ttl=value.t")))
+        .isTrue();
+  }
+
+  @Test
+  void should_close_session_when_building_state_fails() {
+    when(metadata.getKeyspace(CqlIdentifier.fromInternal("shop"))).thenReturn(Optional.empty());
+
+    assertThatThrownBy(
+            () ->
+                LifeCycleManager.buildInstanceStateOrClose(
+                    session, new CassandraSinkConfig(implicitProps("shop"))))
+        .isInstanceOf(ConfigException.class);
+    verify(session).close();
   }
 
   private static Map<String, String> implicitProps(String keyspace) {

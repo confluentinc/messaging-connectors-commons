@@ -36,6 +36,7 @@ import com.datastax.oss.driver.api.core.servererrors.InvalidQueryException;
 import com.datastax.oss.driver.api.core.servererrors.UnauthorizedException;
 import com.datastax.oss.driver.api.core.type.DataType;
 import com.datastax.oss.driver.api.core.type.DataTypes;
+import edu.umd.cs.findbugs.annotations.Nullable;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -106,25 +107,18 @@ public class DdlSchemaReconciler implements SchemaReconciler {
     if (existing != null) {
       return existing;
     }
-    Optional<TableMetadata> table = LifeCycleManager.findTableMetadata(session, tableConfig);
-    if (!table.isPresent()) {
+    Optional<TableMetadata> found = LifeCycleManager.findTableMetadata(session, tableConfig);
+    if (!found.isPresent()) {
       createTable(tableConfig, record);
-      table = LifeCycleManager.findTableMetadata(session, tableConfig);
-      if (!table.isPresent()) {
-        throw new IllegalStateException(
-            String.format(
-                "Table %s is not visible after creation", tableConfig.getKeyspaceAndTable()));
-      }
-    } else if (config.isEvolveTable()) {
-      table =
-          Optional.of(
-              addMissingColumns(
-                  tableConfig,
-                  table.get(),
-                  tableConfig.getMapping(),
-                  source -> explicitColumnType(tableConfig, record, source)));
     }
-    return prepare(tableConfig, table.get(), tableConfig.getMapping());
+    // Runs after CREATE too: IF NOT EXISTS may have kept a table with fewer columns.
+    TableMetadata table =
+        addMissingColumns(
+            tableConfig,
+            found.isPresent() ? found.get() : createdTable(tableConfig),
+            tableConfig.getMapping(),
+            source -> explicitColumnType(tableConfig, record, source));
+    return prepare(tableConfig, table, tableConfig.getMapping());
   }
 
   private RecordMapper reconcileImplicit(TableConfig tableConfig, AbstractSinkRecord record) {
@@ -137,25 +131,26 @@ public class DdlSchemaReconciler implements SchemaReconciler {
               tableConfig.getKeyspaceAndTable()));
     }
     Map<CqlIdentifier, CqlIdentifier> mapping = ImplicitMapping.forSchemas(keySchema, valueSchema);
-    Optional<TableMetadata> table = LifeCycleManager.findTableMetadata(session, tableConfig);
-    if (!table.isPresent()) {
+    Optional<TableMetadata> found = LifeCycleManager.findTableMetadata(session, tableConfig);
+    if (!found.isPresent()) {
       createImplicitTable(tableConfig, keySchema, valueSchema, mapping);
-      table = LifeCycleManager.findTableMetadata(session, tableConfig);
-      if (!table.isPresent()) {
-        throw new IllegalStateException(
-            String.format(
-                "Table %s is not visible after creation", tableConfig.getKeyspaceAndTable()));
-      }
-    } else {
-      table =
-          Optional.of(
-              addMissingColumns(
-                  tableConfig,
-                  table.get(),
-                  mapping,
-                  source -> sourceType(keySchema, valueSchema, source)));
     }
-    return prepare(tableConfig, table.get(), mapping);
+    TableMetadata existing = found.isPresent() ? found.get() : createdTable(tableConfig);
+    mapping = ImplicitMapping.resolveColumns(mapping, existing, tableConfig.getKeyspaceAndTable());
+    TableMetadata table =
+        addMissingColumns(
+            tableConfig, existing, mapping, source -> sourceType(keySchema, valueSchema, source));
+    return prepare(tableConfig, table, mapping);
+  }
+
+  private TableMetadata createdTable(TableConfig tableConfig) {
+    return LifeCycleManager.findTableMetadata(session, tableConfig)
+        .orElseThrow(
+            () ->
+                new IllegalStateException(
+                    String.format(
+                        "Table %s is not visible after creation",
+                        tableConfig.getKeyspaceAndTable())));
   }
 
   private RecordMapper prepare(
@@ -210,7 +205,7 @@ public class DdlSchemaReconciler implements SchemaReconciler {
     createTable(tableConfig, partitionKey, columns);
   }
 
-  /** Adds missing mapped value columns when evolveTable is on; returns the current table. */
+  /** Adds missing mapped value columns when evolveTable is on, else fails; returns the table. */
   private TableMetadata addMissingColumns(
       TableConfig tableConfig,
       TableMetadata table,
@@ -261,7 +256,7 @@ public class DdlSchemaReconciler implements SchemaReconciler {
         // Another task or worker may have added it first; existing columns are never retyped.
         session.refreshSchema();
         if (!visibleTable(tableConfig).getColumn(column.getKey()).isPresent()) {
-          throw new SchemaMismatchException(String.format("Failed to run %s", cql), e);
+          throw invalid("ALTER TABLE", tableConfig, cql, e);
         }
       }
     }
@@ -302,7 +297,7 @@ public class DdlSchemaReconciler implements SchemaReconciler {
   /** True for sources whose column type can be derived on evolve: value fields and now(). */
   static boolean isEvolvableSource(CqlIdentifier source) {
     String name = source.asInternal();
-    return name.equals(VALUE) || name.startsWith(VALUE + '.') || name.equals(NOW_FUNCTION);
+    return name.startsWith(VALUE + '.') || name.equals(NOW_FUNCTION);
   }
 
   private static boolean isKeySourced(CqlIdentifier source) {
@@ -334,12 +329,40 @@ public class DdlSchemaReconciler implements SchemaReconciler {
       }
     }
     if (partitionKey.isEmpty()) {
-      throw new SchemaMismatchException(
-          String.format(
-              "Cannot create table %s: no mapped column comes from the record key to form the primary key",
-              tableConfig.getKeyspaceAndTable()));
+      throw new SchemaMismatchException(noKeyColumn(tableConfig));
     }
     createTable(tableConfig, partitionKey, columns);
+  }
+
+  /** Why an explicit mapping cannot create its table, or null if it can. */
+  @Nullable
+  static String createTableProblem(TableConfig tableConfig) {
+    boolean hasKey = false;
+    for (Map.Entry<CqlIdentifier, CqlIdentifier> entry : tableConfig.getMapping().entrySet()) {
+      CqlIdentifier column = entry.getKey();
+      if (SinkUtil.isTtlMappingColumn(column) || SinkUtil.isTimestampMappingColumn(column)) {
+        continue;
+      }
+      String source = entry.getValue().asInternal();
+      if (source.startsWith(KEY + '.')) {
+        hasKey = true;
+      } else if (!source.startsWith(VALUE + '.') && !source.equals(NOW_FUNCTION)) {
+        return underivable(tableConfig, source);
+      }
+    }
+    return hasKey ? null : noKeyColumn(tableConfig);
+  }
+
+  private static String noKeyColumn(TableConfig tableConfig) {
+    return String.format(
+        "Cannot create table %s: no mapped column comes from the record key to form the primary key",
+        tableConfig.getKeyspaceAndTable());
+  }
+
+  private static String underivable(TableConfig tableConfig, String source) {
+    return String.format(
+        "Cannot derive a column type for %s in table %s; define the column manually",
+        source, tableConfig.getKeyspaceAndTable());
   }
 
   private static DataType explicitColumnType(
@@ -353,10 +376,7 @@ public class DdlSchemaReconciler implements SchemaReconciler {
     if (source.equals(NOW_FUNCTION)) {
       return DataTypes.TIMEUUID;
     }
-    throw new SchemaMismatchException(
-        String.format(
-            "Cannot derive a column type for %s in table %s; define the column manually",
-            source, tableConfig.getKeyspaceAndTable()));
+    throw new SchemaMismatchException(underivable(tableConfig, source));
   }
 
   private void createTable(
@@ -380,9 +400,24 @@ public class DdlSchemaReconciler implements SchemaReconciler {
       session.execute(SimpleStatement.newInstance(cql));
     } catch (UnauthorizedException e) {
       throw notAuthorized(kind, tableConfig, e);
+    } catch (InvalidQueryException e) {
+      throw invalid(kind, tableConfig, cql, e);
     }
-    session.checkSchemaAgreement();
+    if (!session.checkSchemaAgreement()) {
+      log.warn(
+          "Schema agreement not reached after creating table {}",
+          tableConfig.getKeyspaceAndTable());
+    }
     session.refreshSchema();
+  }
+
+  private static FatalSchemaException invalid(
+      String kind, TableConfig tableConfig, String cql, InvalidQueryException e) {
+    return new FatalSchemaException(
+        String.format(
+            "Failed to run %s on %s (%s): %s",
+            kind, tableConfig.getKeyspaceAndTable(), cql, e.getMessage()),
+        e);
   }
 
   private static FatalSchemaException notAuthorized(

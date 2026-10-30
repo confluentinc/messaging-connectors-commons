@@ -141,7 +141,7 @@ public class LifeCycleManager {
             x -> {
               CassandraSinkConfig config = new CassandraSinkConfig(props);
               CqlSession session = buildCqlSession(config, task.version(), task.applicationName());
-              return buildInstanceState(session, config);
+              return buildInstanceStateOrClose(session, config);
             });
     instanceState.registerTask(task);
     return instanceState;
@@ -501,6 +501,22 @@ public class LifeCycleManager {
    * @param config the sink config
    * @return a new InstanceState
    */
+  /** Builds the InstanceState, closing the session if that fails. */
+  @VisibleForTesting
+  @NonNull
+  static InstanceState buildInstanceStateOrClose(CqlSession session, CassandraSinkConfig config) {
+    try {
+      return buildInstanceState(session, config);
+    } catch (RuntimeException | Error e) {
+      try {
+        session.close();
+      } catch (RuntimeException closeError) {
+        e.addSuppressed(closeError);
+      }
+      throw e;
+    }
+  }
+
   @NonNull
   private static InstanceState buildInstanceState(CqlSession session, CassandraSinkConfig config) {
 
@@ -605,6 +621,13 @@ public class LifeCycleManager {
     }
     Optional<TableMetadata> table = findTableMetadata(session, tableConfig);
     if (!table.isPresent()) {
+      if (config.isCreateTable()) {
+        String problem = DdlSchemaReconciler.createTableProblem(tableConfig);
+        if (problem != null) {
+          throw new ConfigException(
+              tableConfig.getSettingPath(MAPPING_OPT), tableConfig.getMappingString(), problem);
+        }
+      }
       return config.isCreateTable();
     }
     if (!config.isEvolveTable() || tableConfig.isQueryProvided()) {
