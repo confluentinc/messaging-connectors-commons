@@ -434,6 +434,18 @@ class LifeCycleManagerTest {
     assertThat(LifeCycleManager.isPendingTable(session, on, missingKey)).isFalse();
     assertThat(
             LifeCycleManager.isPendingTable(
+                session,
+                on,
+                makeTableConfig("ks", "mytable", String.format("%s=key.f1, nocol=header.h", C1))))
+        .isFalse();
+    assertThat(
+            LifeCycleManager.isPendingTable(
+                session,
+                on,
+                makeTableConfig("ks", "mytable", String.format("%s=key.f1, nocol=now()", C1))))
+        .isTrue();
+    assertThat(
+            LifeCycleManager.isPendingTable(
                 session, on, makeTableConfig("ks", "mytable", C1 + "=key.f1")))
         .isFalse();
   }

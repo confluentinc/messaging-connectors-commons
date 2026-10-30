@@ -252,16 +252,17 @@ public class DdlSchemaReconciler implements SchemaReconciler {
   private TableMetadata alterTable(
       TableConfig tableConfig, LinkedHashMap<CqlIdentifier, DataType> columns) {
     for (Map.Entry<CqlIdentifier, DataType> column : columns.entrySet()) {
+      String cql = addColumnCql(tableConfig, column.getKey(), column.getValue());
       try {
-        session.execute(
-            SimpleStatement.newInstance(
-                addColumnCql(tableConfig, column.getKey(), column.getValue())));
+        session.execute(SimpleStatement.newInstance(cql));
       } catch (UnauthorizedException e) {
         throw notAuthorized("ALTER TABLE", tableConfig, e);
       } catch (InvalidQueryException e) {
-        // Another task or worker may have added it first.
+        // Another task or worker may have added it first; existing columns are never retyped.
         session.refreshSchema();
-        checkExistingColumn(tableConfig, column.getKey(), column.getValue(), e);
+        if (!visibleTable(tableConfig).getColumn(column.getKey()).isPresent()) {
+          throw new SchemaMismatchException(String.format("Failed to run %s", cql), e);
+        }
       }
     }
     if (!session.checkSchemaAgreement()) {
@@ -271,24 +272,6 @@ public class DdlSchemaReconciler implements SchemaReconciler {
     }
     session.refreshSchema();
     return visibleTable(tableConfig);
-  }
-
-  private void checkExistingColumn(
-      TableConfig tableConfig, CqlIdentifier column, DataType type, InvalidQueryException cause) {
-    Optional<ColumnMetadata> existing = visibleTable(tableConfig).getColumn(column);
-    if (!existing.isPresent()) {
-      throw cause;
-    }
-    DataType existingType = existing.get().getType();
-    if (!existingType.equals(type)) {
-      throw new SchemaMismatchException(
-          String.format(
-              "Column %s of table %s has type %s, but the record field needs %s",
-              column.asCql(true),
-              tableConfig.getKeyspaceAndTable(),
-              existingType.asCql(true, true),
-              type.asCql(true, true)));
-    }
   }
 
   private TableMetadata visibleTable(TableConfig tableConfig) {
@@ -316,7 +299,13 @@ public class DdlSchemaReconciler implements SchemaReconciler {
         .collect(Collectors.toList());
   }
 
-  static boolean isKeySourced(CqlIdentifier source) {
+  /** True for sources whose column type can be derived on evolve: value fields and now(). */
+  static boolean isEvolvableSource(CqlIdentifier source) {
+    String name = source.asInternal();
+    return name.equals(VALUE) || name.startsWith(VALUE + '.') || name.equals(NOW_FUNCTION);
+  }
+
+  private static boolean isKeySourced(CqlIdentifier source) {
     String name = source.asInternal();
     return name.equals(KEY) || name.startsWith(KEY + '.');
   }

@@ -613,7 +613,7 @@ public class LifeCycleManager {
     List<Map.Entry<CqlIdentifier, CqlIdentifier>> missing =
         DdlSchemaReconciler.missingColumns(table.get(), tableConfig.getMapping());
     return !missing.isEmpty()
-        && missing.stream().noneMatch(e -> DdlSchemaReconciler.isKeySourced(e.getValue()));
+        && missing.stream().allMatch(e -> DdlSchemaReconciler.isEvolvableSource(e.getValue()));
   }
 
   static ConvertingCodecFactory codecFactory(TopicConfig topicConfig) {

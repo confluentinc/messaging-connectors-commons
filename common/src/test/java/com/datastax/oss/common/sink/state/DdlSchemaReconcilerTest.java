@@ -608,23 +608,22 @@ class DdlSchemaReconcilerTest {
   }
 
   @Test
-  void should_fail_record_on_type_conflict() {
+  void should_not_compare_types_when_column_already_exists() {
     evolvingTable("age");
     serverColumns.put(
         CqlIdentifier.fromInternal("age"),
         column(CqlIdentifier.fromInternal("age"), DataTypes.TEXT));
     TableConfig tableConfig = implicitPending("orders");
 
-    assertThatThrownBy(
-            () ->
-                reconciler()
-                    .mapperFor(
-                        tableConfig,
-                        record(keySchema, valueWith("age", prim(AbstractSchema.Type.INT32, null)))))
-        .isInstanceOf(SchemaMismatchException.class)
-        .hasMessageContaining("age")
-        .hasMessageContaining("has type text");
-    verify(session, never()).prepareAsync(anyString());
+    RecordMapper mapper =
+        reconciler()
+            .mapperFor(
+                tableConfig,
+                record(keySchema, valueWith("age", prim(AbstractSchema.Type.INT32, null))));
+
+    verify(session, times(1)).execute(any(Statement.class));
+    verify(session).prepareAsync(startsWith("INSERT INTO shop.orders(id,name,ts,age) VALUES"));
+    assertThat(mapper).isNotNull().isSameAs(state.getRecordMapper(tableConfig));
   }
 
   @Test
@@ -641,8 +640,9 @@ class DdlSchemaReconcilerTest {
                         tableConfig,
                         record(
                             keySchema, valueWith("email", prim(AbstractSchema.Type.STRING, null)))))
-        .isInstanceOf(InvalidQueryException.class)
-        .hasMessage("some other problem");
+        .isInstanceOf(SchemaMismatchException.class)
+        .hasMessageContaining("ALTER TABLE shop.orders ADD email text")
+        .hasCauseInstanceOf(InvalidQueryException.class);
     verify(session, never()).prepareAsync(anyString());
   }
 
