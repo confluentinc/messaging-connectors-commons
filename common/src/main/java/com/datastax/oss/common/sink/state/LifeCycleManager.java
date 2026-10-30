@@ -188,7 +188,7 @@ public class LifeCycleManager {
     if (!StringUtil.isEmpty(nonExistentCols)) {
       throw new ConfigException(
           tableConfig.getSettingPath(MAPPING_OPT),
-          tableConfig.getMappingString(),
+          mappingText(tableConfig, mapping),
           String.format(
               "The following columns do not exist in table %s: %s",
               tableConfig.getTable().asInternal(), nonExistentCols));
@@ -206,13 +206,25 @@ public class LifeCycleManager {
     if (!StringUtil.isEmpty(nonExistentKeyCols)) {
       throw new ConfigException(
           tableConfig.getSettingPath(MAPPING_OPT),
-          tableConfig.getMappingString(),
+          mappingText(tableConfig, mapping),
           String.format(
               "The following columns are part of the primary key but are not mapped: %s",
               nonExistentKeyCols));
     }
 
     return mapping.keySet().size() == table.getColumns().size();
+  }
+
+  private static String mappingText(
+      TableConfig tableConfig, Map<CqlIdentifier, CqlIdentifier> mapping) {
+    if (!tableConfig.isImplicit()) {
+      return tableConfig.getMappingString();
+    }
+    return mapping
+        .entrySet()
+        .stream()
+        .map(e -> e.getKey().asCql(true) + "=" + e.getValue().asInternal())
+        .collect(Collectors.joining(", "));
   }
 
   /**
@@ -462,7 +474,7 @@ public class LifeCycleManager {
   static void ensureKeyspaces(
       CqlSession session, CassandraSinkConfig config, KeyspaceCreator creator) {
     Set<CqlIdentifier> keyspaces = new LinkedHashSet<>();
-    config.getKeyspace().ifPresent(ks -> keyspaces.add(CqlIdentifier.fromInternal(ks)));
+    config.getKeyspaceIdentifier().ifPresent(keyspaces::add);
     config
         .getTopicConfigs()
         .values()
@@ -513,9 +525,7 @@ public class LifeCycleManager {
             .stream()
             .map(
                 topicConfig -> {
-                  ConvertingCodecFactory codecFactory =
-                      topicConfig.createCodecFactory(CODEC_REGISTRY);
-                  TopicState topicState = new TopicState(codecFactory);
+                  TopicState topicState = new TopicState(codecFactory(topicConfig));
                   topicStates.put(topicConfig.getTopicName(), topicState);
 
                   return topicConfig
@@ -567,13 +577,18 @@ public class LifeCycleManager {
     return new InstanceState(config, session, topicStates, metricRegistry);
   }
 
-  /** True when createTable is on and the table, but not its keyspace, is missing. */
+  /** True for implicit bindings, or with createTable when only the table is missing. */
   @VisibleForTesting
   static boolean isPendingTable(
       CqlSession session, CassandraSinkConfig config, TableConfig tableConfig) {
-    return config.isCreateTable()
-        && session.getMetadata().getKeyspace(tableConfig.getKeyspace()).isPresent()
-        && !findTableMetadata(session, tableConfig).isPresent();
+    return tableConfig.isImplicit()
+        || config.isCreateTable()
+            && session.getMetadata().getKeyspace(tableConfig.getKeyspace()).isPresent()
+            && !findTableMetadata(session, tableConfig).isPresent();
+  }
+
+  static ConvertingCodecFactory codecFactory(TopicConfig topicConfig) {
+    return topicConfig.createCodecFactory(CODEC_REGISTRY);
   }
 
   /**

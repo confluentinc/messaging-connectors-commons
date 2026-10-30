@@ -25,7 +25,9 @@ import com.datastax.oss.driver.api.core.DefaultConsistencyLevel;
 import com.datastax.oss.driver.shaded.guava.common.base.Splitter;
 import com.datastax.oss.protocol.internal.ProtocolConstants;
 import edu.umd.cs.findbugs.annotations.NonNull;
+import edu.umd.cs.findbugs.annotations.Nullable;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -65,6 +67,7 @@ public class TableConfig extends AbstractConfig {
   private final boolean nullToUnset;
   private final boolean deletesEnabled;
   private final String query;
+  private final boolean implicit;
 
   public TableConfig(
       @NonNull String topicName,
@@ -72,13 +75,24 @@ public class TableConfig extends AbstractConfig {
       @NonNull String table,
       @NonNull Map<String, String> settings,
       boolean cloud) {
-    super(makeTableConfigDef(topicName, keyspace, table), settings, false);
+    this(topicName, keyspace, table, settings, cloud, false);
+  }
+
+  private TableConfig(
+      @NonNull String topicName,
+      @NonNull String keyspace,
+      @NonNull String table,
+      @NonNull Map<String, String> settings,
+      boolean cloud,
+      boolean implicit) {
+    super(makeTableConfigDef(topicName, keyspace, table, implicit), settings, false);
 
     this.topicName = topicName;
     this.keyspace = parseLoosely(keyspace);
-    this.table = parseLoosely(table);
+    this.table = implicit ? CqlIdentifier.fromInternal(table) : parseLoosely(table);
+    this.implicit = implicit;
     mappingString = getString(getTableSettingPath(topicName, keyspace, table, MAPPING_OPT));
-    mapping = parseMappingString(mappingString);
+    mapping = implicit ? Collections.emptyMap() : parseMappingString(mappingString);
     String clOptName = getTableSettingPath(topicName, keyspace, table, CL_OPT);
     String clString = getString(clOptName);
     try {
@@ -108,6 +122,13 @@ public class TableConfig extends AbstractConfig {
         getBoolean(getTableSettingPath(topicName, keyspace, table, DELETES_ENABLED_OPT));
     query = getString(getTableSettingPath(topicName, keyspace, table, QUERY_OPT));
     validateQuery();
+  }
+
+  /** A binding to the table named after the topic; its mapping is derived per record schema. */
+  @NonNull
+  public static TableConfig implicit(
+      @NonNull String topicName, @NonNull String keyspace, boolean cloud) {
+    return new TableConfig(topicName, keyspace, topicName, Collections.emptyMap(), cloud, true);
   }
 
   private void validateQuery() {
@@ -187,9 +208,14 @@ public class TableConfig extends AbstractConfig {
     return mapping;
   }
 
-  @NonNull
+  /** The configured mapping, or null for an implicit binding. */
+  @Nullable
   public String getMappingString() {
     return mappingString;
+  }
+
+  public boolean isImplicit() {
+    return implicit;
   }
 
   @NonNull
@@ -264,11 +290,13 @@ public class TableConfig extends AbstractConfig {
         ttl,
         nullToUnset,
         deletesEnabled,
-        Splitter.on(DELIM_PAT)
-            .splitToList(mappingString)
-            .stream()
-            .map(m -> "      " + m)
-            .collect(Collectors.joining("\n")));
+        implicit
+            ? "      (implicit)"
+            : Splitter.on(DELIM_PAT)
+                .splitToList(mappingString)
+                .stream()
+                .map(m -> "      " + m)
+                .collect(Collectors.joining("\n")));
   }
 
   /**
@@ -282,14 +310,21 @@ public class TableConfig extends AbstractConfig {
    */
   @NonNull
   private static ConfigDef makeTableConfigDef(
-      @NonNull String topicName, @NonNull String keyspace, @NonNull String table) {
-    return new ConfigDef()
-        .define(
-            getTableSettingPath(topicName, keyspace, table, MAPPING_OPT),
-            ConfigDef.Type.STRING,
-            ConfigDef.Importance.HIGH,
-            "Mapping of record fields to dse columns, in the form of 'col1=value.f1, col2=key.f1'")
-        .define(
+      @NonNull String topicName,
+      @NonNull String keyspace,
+      @NonNull String table,
+      boolean implicit) {
+    String mappingDoc =
+        "Mapping of record fields to dse columns, in the form of 'col1=value.f1, col2=key.f1'";
+    String mappingPath = getTableSettingPath(topicName, keyspace, table, MAPPING_OPT);
+    ConfigDef def =
+        implicit
+            ? new ConfigDef()
+                .define(
+                    mappingPath, ConfigDef.Type.STRING, null, ConfigDef.Importance.HIGH, mappingDoc)
+            : new ConfigDef()
+                .define(mappingPath, ConfigDef.Type.STRING, ConfigDef.Importance.HIGH, mappingDoc);
+    return def.define(
             getTableSettingPath(topicName, keyspace, table, DELETES_ENABLED_OPT),
             ConfigDef.Type.BOOLEAN,
             true,
@@ -335,7 +370,7 @@ public class TableConfig extends AbstractConfig {
   }
 
   @NonNull
-  private static CqlIdentifier parseLoosely(@NonNull String value) {
+  static CqlIdentifier parseLoosely(@NonNull String value) {
     // If the value is unquoted, treat it as a literal (no real parsing).
     // Otherwise parse it as cql. The idea is that users should be able to specify
     // case-sensitive identifiers in the mapping spec without quotes.

@@ -82,6 +82,9 @@ public class DdlSchemaReconciler implements SchemaReconciler {
   }
 
   private RecordMapper reconcile(TableConfig tableConfig, AbstractSinkRecord record) {
+    if (tableConfig.isImplicit()) {
+      return reconcileImplicit(tableConfig, record);
+    }
     RecordMapper existing = state.getRecordMapper(tableConfig);
     if (existing != null) {
       return existing;
@@ -96,21 +99,46 @@ public class DdlSchemaReconciler implements SchemaReconciler {
                 "Table %s is not visible after creation", tableConfig.getKeyspaceAndTable()));
       }
     }
+    return prepare(tableConfig, table.get(), tableConfig.getMapping());
+  }
+
+  private RecordMapper reconcileImplicit(TableConfig tableConfig, AbstractSinkRecord record) {
+    AbstractSchema keySchema = record.keySchema();
+    AbstractSchema valueSchema = record.valueSchema();
+    if (valueSchema == null || valueSchema.type() != AbstractSchema.Type.STRUCT) {
+      throw new SchemaMismatchException(
+          String.format(
+              "Implicit mapping to %s needs a struct record value schema",
+              tableConfig.getKeyspaceAndTable()));
+    }
+    Map<CqlIdentifier, CqlIdentifier> mapping = ImplicitMapping.forSchemas(keySchema, valueSchema);
+    Optional<TableMetadata> table = LifeCycleManager.findTableMetadata(session, tableConfig);
+    if (!table.isPresent()) {
+      createImplicitTable(tableConfig, keySchema, valueSchema, mapping);
+      table = LifeCycleManager.findTableMetadata(session, tableConfig);
+      if (!table.isPresent()) {
+        throw new IllegalStateException(
+            String.format(
+                "Table %s is not visible after creation", tableConfig.getKeyspaceAndTable()));
+      }
+    } else {
+      rejectMissingColumns(tableConfig, table.get(), keySchema, valueSchema, mapping);
+    }
+    return prepare(tableConfig, table.get(), mapping);
+  }
+
+  private RecordMapper prepare(
+      TableConfig tableConfig, TableMetadata table, Map<CqlIdentifier, CqlIdentifier> mapping) {
     List<CqlIdentifier> primaryKey =
-        table
-            .get()
-            .getPrimaryKey()
-            .stream()
-            .map(ColumnMetadata::getName)
-            .collect(Collectors.toList());
+        table.getPrimaryKey().stream().map(ColumnMetadata::getName).collect(Collectors.toList());
     try {
       LifeCycleManager.prepareStatementsAsync(
               session,
               state.getTopicState(tableConfig.getTopicName()),
               tableConfig,
-              table.get(),
+              table,
               primaryKey,
-              tableConfig.getMapping(),
+              mapping,
               true)
           .toCompletableFuture()
           .join();
@@ -118,6 +146,71 @@ public class DdlSchemaReconciler implements SchemaReconciler {
       throw e.getCause() instanceof RuntimeException ? (RuntimeException) e.getCause() : e;
     }
     return state.getRecordMapper(tableConfig);
+  }
+
+  private void createImplicitTable(
+      TableConfig tableConfig,
+      AbstractSchema keySchema,
+      AbstractSchema valueSchema,
+      Map<CqlIdentifier, CqlIdentifier> mapping) {
+    if (keySchema == null || keySchema.type() != AbstractSchema.Type.STRUCT) {
+      throw new SchemaMismatchException(
+          String.format(
+              "Cannot create table %s: implicit table creation needs a struct record key",
+              tableConfig.getKeyspaceAndTable()));
+    }
+    LinkedHashMap<CqlIdentifier, DataType> partitionKey = new LinkedHashMap<>();
+    LinkedHashMap<CqlIdentifier, DataType> columns = new LinkedHashMap<>();
+    for (Map.Entry<CqlIdentifier, CqlIdentifier> entry : mapping.entrySet()) {
+      String source = entry.getValue().asInternal();
+      DataType type = sourceType(keySchema, valueSchema, source);
+      if (source.startsWith(KEY + '.')) {
+        partitionKey.put(entry.getKey(), type);
+      } else {
+        columns.put(entry.getKey(), type);
+      }
+    }
+    if (partitionKey.isEmpty()) {
+      throw new SchemaMismatchException(
+          String.format(
+              "Cannot create table %s: the record key has no fields to form the primary key",
+              tableConfig.getKeyspaceAndTable()));
+    }
+    createTable(tableConfig, partitionKey, columns);
+  }
+
+  private static void rejectMissingColumns(
+      TableConfig tableConfig,
+      TableMetadata table,
+      AbstractSchema keySchema,
+      AbstractSchema valueSchema,
+      Map<CqlIdentifier, CqlIdentifier> mapping) {
+    List<String> alters =
+        mapping
+            .entrySet()
+            .stream()
+            .filter(e -> !table.getColumn(e.getKey()).isPresent())
+            .map(
+                e ->
+                    CqlDdl.addColumn(
+                        tableConfig.getKeyspace(),
+                        tableConfig.getTable(),
+                        e.getKey(),
+                        sourceType(keySchema, valueSchema, e.getValue().asInternal())))
+            .collect(Collectors.toList());
+    if (!alters.isEmpty()) {
+      throw new SchemaMismatchException(
+          String.format(
+              "Table %s has no column for some record fields; add them with: %s",
+              tableConfig.getKeyspaceAndTable(), String.join("; ", alters)));
+    }
+  }
+
+  private static DataType sourceType(
+      AbstractSchema keySchema, AbstractSchema valueSchema, String source) {
+    return source.startsWith(KEY + '.')
+        ? fieldType(keySchema, KEY, source)
+        : fieldType(valueSchema, VALUE, source);
   }
 
   private void createTable(TableConfig tableConfig, AbstractSinkRecord record) {
@@ -148,6 +241,13 @@ public class DdlSchemaReconciler implements SchemaReconciler {
               "Cannot create table %s: no mapped column comes from the record key to form the primary key",
               tableConfig.getKeyspaceAndTable()));
     }
+    createTable(tableConfig, partitionKey, columns);
+  }
+
+  private void createTable(
+      TableConfig tableConfig,
+      LinkedHashMap<CqlIdentifier, DataType> partitionKey,
+      LinkedHashMap<CqlIdentifier, DataType> columns) {
     String cql =
         CqlDdl.createTable(
             tableConfig.getKeyspace(), tableConfig.getTable(), partitionKey, columns);

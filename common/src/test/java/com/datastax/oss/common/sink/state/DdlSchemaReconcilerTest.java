@@ -22,6 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -286,5 +287,144 @@ class DdlSchemaReconcilerTest {
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, valueSchema)))
         .isInstanceOf(FatalSchemaException.class)
         .hasMessageContaining("CREATE TABLE on shop.orders");
+  }
+
+  private TableConfig implicitPending(String topic) {
+    TableConfig tableConfig = TableConfig.implicit(topic, "shop", false);
+    TopicState implicitTopic = new TopicState(null);
+    implicitTopic.addPendingTable(tableConfig);
+    Map<String, TopicState> topicStates = new HashMap<>();
+    topicStates.put(topic, implicitTopic);
+    state = new InstanceState(mock(CassandraSinkConfig.class), session, topicStates, registry());
+    return tableConfig;
+  }
+
+  private void assertImplicitCreate(String topic, String qualified) {
+    when(keyspace.getTable(CqlIdentifier.fromInternal(topic)))
+        .thenReturn(Optional.empty(), Optional.of(table));
+    TableConfig tableConfig = implicitPending(topic);
+
+    RecordMapper mapper = reconciler().mapperFor(tableConfig, record(keySchema, valueSchema));
+
+    ArgumentCaptor<SimpleStatement> stmt = ArgumentCaptor.forClass(SimpleStatement.class);
+    verify(session).execute(stmt.capture());
+    assertThat(stmt.getValue().getQuery())
+        .isEqualTo(
+            "CREATE TABLE IF NOT EXISTS "
+                + qualified
+                + " (id bigint,name text,ts timestamp,PRIMARY KEY(id))");
+    verify(session).prepareAsync(startsWith("INSERT INTO " + qualified + "(id,name,ts) VALUES"));
+    assertThat(mapper).isNotNull().isSameAs(state.getRecordMapper(tableConfig));
+  }
+
+  @Test
+  void should_create_table_named_exactly_like_topic() {
+    assertImplicitCreate("orders-v1.raw", "shop.\"orders-v1.raw\"");
+  }
+
+  @Test
+  void should_create_case_sensitive_table_named_like_topic() {
+    assertImplicitCreate("Orders", "shop.\"Orders\"");
+  }
+
+  @Test
+  void should_create_single_key_column_when_key_field_also_in_value() {
+    TableConfig tableConfig = implicitPending("orders");
+    AbstractSchema value =
+        struct(
+            "id",
+            prim(AbstractSchema.Type.INT64, null),
+            "name",
+            prim(AbstractSchema.Type.STRING, null));
+
+    reconciler().mapperFor(tableConfig, record(keySchema, value));
+
+    ArgumentCaptor<SimpleStatement> stmt = ArgumentCaptor.forClass(SimpleStatement.class);
+    verify(session).execute(stmt.capture());
+    assertThat(stmt.getValue().getQuery())
+        .isEqualTo("CREATE TABLE IF NOT EXISTS shop.orders (id bigint,name text,PRIMARY KEY(id))");
+    verify(session).prepareAsync(startsWith("INSERT INTO shop.orders(id,name) VALUES (:id,:name)"));
+  }
+
+  @Test
+  void should_reject_non_struct_key_for_implicit_create() {
+    TableConfig tableConfig = implicitPending("orders");
+
+    assertThatThrownBy(
+            () ->
+                reconciler()
+                    .mapperFor(
+                        tableConfig, record(prim(AbstractSchema.Type.INT64, null), valueSchema)))
+        .isInstanceOf(SchemaMismatchException.class)
+        .hasMessageContaining("implicit table creation needs a struct record key");
+    verify(session, never()).execute(any(Statement.class));
+  }
+
+  @Test
+  void should_reject_schemaless_value_in_implicit_mode() {
+    TableConfig tableConfig = implicitPending("orders");
+
+    assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, null)))
+        .isInstanceOf(SchemaMismatchException.class)
+        .hasMessageContaining("struct record value");
+    verify(session, never()).execute(any(Statement.class));
+  }
+
+  @Test
+  void should_report_implicit_create_table_cql_when_create_table_off() {
+    when(config.isCreateTable()).thenReturn(false);
+    TableConfig tableConfig = implicitPending("orders");
+
+    assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, valueSchema)))
+        .isInstanceOf(SchemaMismatchException.class)
+        .hasMessageContaining("Table shop.orders does not exist")
+        .hasMessageContaining(
+            "CREATE TABLE IF NOT EXISTS shop.orders (id bigint,name text,ts timestamp,PRIMARY KEY(id))");
+    verify(session, never()).execute(any(Statement.class));
+  }
+
+  @Test
+  void should_prepare_implicit_mapping_against_existing_table_without_ddl() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    TableConfig tableConfig = implicitPending("orders");
+
+    RecordMapper mapper = reconciler().mapperFor(tableConfig, record(keySchema, valueSchema));
+
+    verify(session, never()).execute(any(Statement.class));
+    verify(session).prepareAsync(startsWith("INSERT INTO shop.orders(id,name,ts) VALUES"));
+    assertThat(mapper).isNotNull();
+  }
+
+  @Test
+  void should_report_alter_table_for_unknown_value_field_when_evolve_off() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    TableConfig tableConfig = implicitPending("orders");
+    AbstractSchema value =
+        struct(
+            "name",
+            prim(AbstractSchema.Type.STRING, null),
+            "email",
+            prim(AbstractSchema.Type.STRING, null));
+
+    assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, value)))
+        .isInstanceOf(SchemaMismatchException.class)
+        .hasMessageContaining("ALTER TABLE shop.orders ADD email text");
+    verify(session, never()).execute(any(Statement.class));
+    verify(session, never()).prepareAsync(anyString());
+  }
+
+  @Test
+  void should_replace_implicit_mapper_when_value_schema_changes() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    TableConfig tableConfig = implicitPending("orders");
+    DdlSchemaReconciler reconciler = reconciler();
+
+    RecordMapper first = reconciler.mapperFor(tableConfig, record(keySchema, valueSchema));
+    RecordMapper second =
+        reconciler.mapperFor(
+            tableConfig, record(keySchema, struct("name", prim(AbstractSchema.Type.STRING, null))));
+
+    verify(session).prepareAsync(startsWith("INSERT INTO shop.orders(id,name) VALUES"));
+    assertThat(second).isNotSameAs(first).isSameAs(state.getRecordMapper(tableConfig));
   }
 }

@@ -30,6 +30,7 @@ import static com.datastax.oss.driver.api.core.config.DefaultDriverOption.SSL_CI
 import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.common.sink.util.SinkUtil;
 import com.datastax.oss.common.sink.util.StringUtil;
+import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.config.DefaultDriverOption;
 import com.datastax.oss.driver.shaded.guava.common.base.Splitter;
 import com.datastax.oss.driver.shaded.guava.common.collect.ImmutableList;
@@ -303,6 +304,7 @@ public class CassandraSinkConfig {
       // topic settings map.
       globalConfig = new AbstractConfig(GLOBAL_CONFIG_DEF, globalSettings, false);
       validateSchemaManagement(settings);
+      refreshImplicitKeyspace();
 
       populateDriverSettingsWithConnectorSettings(globalSettings);
 
@@ -325,16 +327,30 @@ public class CassandraSinkConfig {
       authConfig = new AuthenticatorConfig(authSettings);
       validateAstraToken();
       topicConfigs = new HashMap<>();
-      topicSettings.forEach(
-          (name, topicConfigMap) ->
-              topicConfigs.put(name, new TopicConfig(name, topicConfigMap, cloud)));
+      String topicsString = globalSettings.get("topics");
+      if (getMappingMode() == MappingMode.IMPLICIT) {
+        if (topicsString != null) {
+          Splitter.on(",")
+              .trimResults()
+              .omitEmptyStrings()
+              .split(topicsString)
+              .forEach(topic -> topicSettings.computeIfAbsent(topic, t -> new HashMap<>()));
+        }
+        topicSettings.forEach(
+            (name, topicConfigMap) ->
+                topicConfigs.put(
+                    name, TopicConfig.implicit(name, topicConfigMap, getKeyspace().get(), cloud)));
+      } else {
+        topicSettings.forEach(
+            (name, topicConfigMap) ->
+                topicConfigs.put(name, new TopicConfig(name, topicConfigMap, cloud)));
+      }
 
       validateCompressionType();
 
       // Verify that we have a topic section for every topic we're subscribing to, if 'topics'
       // was provided. A user may use topics.regex to subscribe by pattern, in which case,
       // they're on their own.
-      String topicsString = globalSettings.get("topics");
       if (topicsString != null) {
         List<String> topics = Splitter.on(",").trimResults().splitToList(topicsString);
         for (String topic : topics) {
@@ -378,12 +394,35 @@ public class CassandraSinkConfig {
     }
     for (String name : settings.keySet()) {
       Matcher m = TOPIC_KS_TABLE_SETTING_PATTERN.matcher(name);
-      if (m.matches() && "mapping".equals(m.group(4))) {
+      if (m.matches()) {
         throw new ConfigException(
             name,
             settings.get(name),
-            "mapping must not be set when mappingMode=IMPLICIT; use mappingMode=EXPLICIT");
+            String.format(
+                "%s must not be set when mappingMode=IMPLICIT "
+                    + "(per-table settings are not supported when mappingMode=IMPLICIT); "
+                    + "use mappingMode=EXPLICIT",
+                m.group(4)));
       }
+    }
+  }
+
+  // An explicit refreshed-keyspaces list would otherwise hide tables created in the keyspace.
+  private void refreshImplicitKeyspace() {
+    if (getMappingMode() != MappingMode.IMPLICIT) {
+      return;
+    }
+    String prefix = withDriverPrefix(METADATA_SCHEMA_REFRESHED_KEYSPACES) + ".";
+    List<String> refreshed =
+        javaDriverSettings
+            .entrySet()
+            .stream()
+            .filter(e -> e.getKey().startsWith(prefix))
+            .map(Map.Entry::getValue)
+            .collect(Collectors.toList());
+    String keyspace = getKeyspaceIdentifier().get().asInternal();
+    if (!refreshed.isEmpty() && !refreshed.contains(keyspace)) {
+      javaDriverSettings.put(prefix + refreshed.size(), keyspace);
     }
   }
 
@@ -699,6 +738,16 @@ public class CassandraSinkConfig {
     return Optional.ofNullable(globalConfig.getString(KEYSPACE_OPT))
         .map(String::trim)
         .filter(v -> !v.isEmpty());
+  }
+
+  /** The global keyspace, parsed like the keyspace of a topic binding. */
+  public Optional<CqlIdentifier> getKeyspaceIdentifier() {
+    return getKeyspace().map(TableConfig::parseLoosely);
+  }
+
+  /** Builds the implicit binding for a topic first seen at runtime. */
+  public TopicConfig implicitTopicConfig(String topic) {
+    return TopicConfig.implicit(topic, Collections.emptyMap(), getKeyspace().get(), isCloud());
   }
 
   public boolean isSchemaManagementEnabled() {

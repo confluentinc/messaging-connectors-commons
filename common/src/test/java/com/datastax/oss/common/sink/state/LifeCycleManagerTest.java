@@ -418,6 +418,57 @@ class LifeCycleManagerTest {
     assertThat(LifeCycleManager.isPendingTable(session, on, missing)).isFalse();
   }
 
+  private static Map<String, String> implicitProps(String keyspace) {
+    Map<String, String> props = new java.util.HashMap<>();
+    props.put("contactPoints", "127.0.0.1");
+    props.put("loadBalancing.localDc", "dc1");
+    props.put("topics", "t1");
+    props.put("mappingMode", "IMPLICIT");
+    props.put("keyspace", keyspace);
+    return props;
+  }
+
+  @Test
+  void should_ensure_implicit_keyspace_parsed_like_bindings() {
+    KeyspaceCreator creator = mock(KeyspaceCreator.class);
+
+    LifeCycleManager.ensureKeyspaces(
+        session, new CassandraSinkConfig(implicitProps("\"Shop\"")), creator);
+
+    verify(creator, times(1)).ensureKeyspace(session, CqlIdentifier.fromInternal("Shop"));
+  }
+
+  @Test
+  void should_always_leave_implicit_binding_pending() {
+    CassandraSinkConfig config = new CassandraSinkConfig(implicitProps("ks"));
+
+    assertThat(
+            LifeCycleManager.isPendingTable(
+                session, config, TableConfig.implicit("mytable", "ks", false)))
+        .isTrue();
+  }
+
+  @Test
+  void should_render_effective_mapping_in_implicit_validation_errors() {
+    Map<CqlIdentifier, CqlIdentifier> mapping = new java.util.LinkedHashMap<>();
+    mapping.put(C1_IDENT, CqlIdentifier.fromInternal("key.c1"));
+    mapping.put(CqlIdentifier.fromInternal("email"), CqlIdentifier.fromInternal("value.email"));
+
+    assertThatThrownBy(
+            () ->
+                LifeCycleManager.prepareStatementsAsync(
+                    session,
+                    new TopicState(null),
+                    TableConfig.implicit("mytable", "ks", false),
+                    table,
+                    Collections.singletonList(C1_IDENT),
+                    mapping,
+                    false))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining("c1=key.c1, email=value.email")
+        .hasMessageContaining("The following columns do not exist in table mytable: email");
+  }
+
   private static TableConfig makeTableConfig(
       String keyspaceName, String tableName, String mapping) {
     return makeTableConfig(keyspaceName, tableName, mapping, -1);

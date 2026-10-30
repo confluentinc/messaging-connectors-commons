@@ -38,6 +38,8 @@ import edu.umd.cs.findbugs.annotations.NonNull;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
@@ -52,6 +54,8 @@ public class InstanceState {
   private final CqlSession session;
   private final CassandraSinkConfig config;
   private final Map<String, TopicState> topicStates;
+  private final ConcurrentMap<String, TopicConfig> implicitTopics = new ConcurrentHashMap<>();
+  private final MetricRegistry metricRegistry;
 
   /** Semaphore to limit the number of concurrent requests. */
   private final Semaphore requestBarrier;
@@ -69,7 +73,8 @@ public class InstanceState {
       @NonNull MetricRegistry metricRegistry) {
     this.session = session;
     this.config = config;
-    this.topicStates = topicStates;
+    this.topicStates = new ConcurrentHashMap<>(topicStates);
+    this.metricRegistry = metricRegistry;
     this.requestBarrier = new Semaphore(getConfig().getMaxConcurrentRequests());
     tasks = Sets.newConcurrentHashSet();
     mappingExecutor =
@@ -160,12 +165,25 @@ public class InstanceState {
   @NonNull
   public TopicConfig getTopicConfig(String topicName) {
     TopicConfig topicConfig = this.config.getTopicConfigs().get(topicName);
+    if (topicConfig == null && config.getMappingMode() == MappingMode.IMPLICIT) {
+      topicConfig = implicitTopics.computeIfAbsent(topicName, this::addImplicitTopic);
+    }
     if (topicConfig == null) {
       throw new ConfigException(
           String.format(
               "Connector has no configuration for record topic '%s'. Please update the configuration and restart.",
               topicName));
     }
+    return topicConfig;
+  }
+
+  // Topics matched by topics.regex are only known once their first record arrives.
+  private TopicConfig addImplicitTopic(String topicName) {
+    TopicConfig topicConfig = config.implicitTopicConfig(topicName);
+    TopicState topicState = new TopicState(LifeCycleManager.codecFactory(topicConfig));
+    topicConfig.getTableConfigs().forEach(topicState::addPendingTable);
+    topicState.initializeMetrics(metricRegistry);
+    topicStates.put(topicName, topicState);
     return topicConfig;
   }
 

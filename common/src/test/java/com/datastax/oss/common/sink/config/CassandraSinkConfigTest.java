@@ -48,6 +48,7 @@ import static com.datastax.oss.common.sink.config.SslConfig.TRUSTSTORE_PATH_OPT;
 import static com.datastax.oss.common.sink.config.TableConfig.MAPPING_OPT;
 import static com.datastax.oss.common.sink.config.TableConfig.getTableSettingPath;
 import static com.datastax.oss.driver.api.core.config.DefaultDriverOption.CONTACT_POINTS;
+import static com.datastax.oss.driver.api.core.config.DefaultDriverOption.METADATA_SCHEMA_REFRESHED_KEYSPACES;
 import static com.datastax.oss.driver.api.core.config.DefaultDriverOption.METRICS_SESSION_CQL_REQUESTS_INTERVAL;
 import static com.datastax.oss.driver.api.core.config.DefaultDriverOption.METRICS_SESSION_ENABLED;
 import static com.datastax.oss.dsbulk.tests.assertions.TestAssertions.assertThat;
@@ -69,6 +70,7 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -1101,5 +1103,120 @@ class CassandraSinkConfigTest {
     Map<String, String> props = astraBase("clientSecret");
     props.remove("createKeyspace");
     assertThatCode(() -> new CassandraSinkConfig(props)).doesNotThrowAnyException();
+  }
+
+  private static Map<String, String> implicitBase() {
+    Map<String, String> props = new HashMap<>();
+    props.put(CONTACT_POINTS_OPT, "127.0.0.1");
+    props.put(DC_OPT, "dc1");
+    props.put("topics", "orders,payments");
+    props.put("mappingMode", "IMPLICIT");
+    props.put("keyspace", "shop");
+    return props;
+  }
+
+  @Test
+  void should_synthesize_binding_per_topic_in_implicit_mode() {
+    CassandraSinkConfig c = new CassandraSinkConfig(implicitBase());
+
+    assertThat(c.getTopicConfigs()).containsOnlyKeys("orders", "payments");
+    for (String topic : new String[] {"orders", "payments"}) {
+      Collection<TableConfig> tables = c.getTopicConfigs().get(topic).getTableConfigs();
+      assertThat(tables).hasSize(1);
+      TableConfig t = tables.iterator().next();
+      assertThat(t.isImplicit()).isTrue();
+      assertThat(t.getTopicName()).isEqualTo(topic);
+      assertThat(t.getKeyspace()).isEqualTo(CqlIdentifier.fromInternal("shop"));
+      assertThat(t.getTable()).isEqualTo(CqlIdentifier.fromInternal(topic));
+      assertThat(t.getMappingString()).isNull();
+    }
+    assertThat(c.toString()).contains("orders", "payments");
+  }
+
+  @Test
+  void should_name_implicit_table_exactly_like_topic() {
+    Map<String, String> props = implicitBase();
+    props.put("topics", "orders-v1.raw,Orders");
+    CassandraSinkConfig c = new CassandraSinkConfig(props);
+
+    assertThat(
+            c.getTopicConfigs()
+                .get("orders-v1.raw")
+                .getTableConfigs()
+                .iterator()
+                .next()
+                .getKeyspaceAndTable())
+        .isEqualTo("shop.\"orders-v1.raw\"");
+    assertThat(c.getTopicConfigs().get("Orders").getTableConfigs().iterator().next().getTable())
+        .isEqualTo(CqlIdentifier.fromInternal("Orders"));
+  }
+
+  @Test
+  void should_parse_quoted_implicit_keyspace_like_bindings() {
+    Map<String, String> props = implicitBase();
+    props.put("keyspace", "\"Shop\"");
+    CassandraSinkConfig c = new CassandraSinkConfig(props);
+
+    assertThat(c.getKeyspaceIdentifier()).contains(CqlIdentifier.fromInternal("Shop"));
+    assertThat(c.getTopicConfigs().get("orders").getTableConfigs().iterator().next().getKeyspace())
+        .isEqualTo(CqlIdentifier.fromInternal("Shop"));
+  }
+
+  @Test
+  void should_include_implicit_keyspace_in_refreshed_keyspaces() {
+    String setting = withDriverPrefix(METADATA_SCHEMA_REFRESHED_KEYSPACES);
+    Map<String, String> props = implicitBase();
+    props.put(setting, "other");
+
+    assertThat(new CassandraSinkConfig(props).getJavaDriverSettings())
+        .containsEntry(setting + ".0", "other")
+        .containsEntry(setting + ".1", "shop")
+        .doesNotContainKey(setting + ".2");
+
+    props.put(setting, "shop, other");
+    assertThat(new CassandraSinkConfig(props).getJavaDriverSettings())
+        .containsEntry(setting + ".0", "shop")
+        .containsEntry(setting + ".1", "other")
+        .doesNotContainKey(setting + ".2");
+
+    props.remove(setting);
+    assertThat(new CassandraSinkConfig(props).getJavaDriverSettings().keySet())
+        .noneMatch(k -> k.startsWith(setting));
+  }
+
+  @Test
+  void should_reject_per_table_settings_in_implicit_mode() {
+    for (String opt :
+        new String[] {
+          "ttl",
+          "consistencyLevel",
+          "nullToUnset",
+          "deletesEnabled",
+          "ttlTimeUnit",
+          "timestampTimeUnit",
+          "query"
+        }) {
+      Map<String, String> props = implicitBase();
+      props.put("topic.orders.shop.orders." + opt, "x");
+      assertThatThrownBy(() -> new CassandraSinkConfig(props))
+          .isInstanceOf(ConfigException.class)
+          .hasMessageContaining("per-table settings are not supported when mappingMode=IMPLICIT")
+          .hasMessageContaining("mappingMode=EXPLICIT");
+    }
+  }
+
+  @Test
+  void should_apply_topic_codec_settings_in_implicit_mode() {
+    Map<String, String> props = implicitBase();
+    props.put("topic.orders.codec.locale", "fr_FR");
+    props.put("topic.extra.codec.timeZone", "Europe/Paris");
+    CassandraSinkConfig c = new CassandraSinkConfig(props);
+
+    assertThat(c.getTopicConfigs().get("orders").getString("topic.orders.codec.locale"))
+        .isEqualTo("fr_FR");
+    assertThat(c.getTopicConfigs().get("extra").getString("topic.extra.codec.timeZone"))
+        .isEqualTo("Europe/Paris");
+    assertThat(c.getTopicConfigs().get("extra").getTableConfigs().iterator().next().isImplicit())
+        .isTrue();
   }
 }
