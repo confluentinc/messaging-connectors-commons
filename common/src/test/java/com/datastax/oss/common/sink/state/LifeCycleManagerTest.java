@@ -25,12 +25,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.common.sink.config.CassandraSinkConfig;
 import com.datastax.oss.common.sink.config.TableConfig;
 import com.datastax.oss.common.sink.config.TableConfigBuilder;
+import com.datastax.oss.common.sink.schema.CqlKeyspaceCreator;
+import com.datastax.oss.common.sink.schema.KeyspaceCreator;
 import com.datastax.oss.common.sink.util.SinkUtil;
 import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.CqlSession;
@@ -340,6 +344,40 @@ class LifeCycleManagerTest {
     assertThatThrownBy(() -> new CassandraSinkConfig(config))
         .isInstanceOf(ConfigException.class)
         .hasMessageContaining(DC_OPT);
+  }
+
+  private static Map<String, String> baseProps() {
+    Map<String, String> props = new java.util.HashMap<>();
+    props.put("contactPoints", "127.0.0.1");
+    props.put("loadBalancing.localDc", "dc1");
+    props.put("topics", "t1,t2");
+    props.put("topic.t1.shop.a.mapping", "c1=value.f1");
+    props.put("topic.t2.shop.b.mapping", "c1=value.f1");
+    return props;
+  }
+
+  @Test
+  void should_not_create_keyspace_creator_when_flag_off() {
+    assertThat(LifeCycleManager.keyspaceCreatorFor(new CassandraSinkConfig(baseProps()))).isNull();
+  }
+
+  @Test
+  void should_create_cql_keyspace_creator_when_flag_on() {
+    Map<String, String> props = baseProps();
+    props.put("createKeyspace", "true");
+
+    assertThat(LifeCycleManager.keyspaceCreatorFor(new CassandraSinkConfig(props)))
+        .isInstanceOf(CqlKeyspaceCreator.class);
+  }
+
+  @Test
+  void should_ensure_each_distinct_keyspace_once() {
+    CassandraSinkConfig config = new CassandraSinkConfig(baseProps());
+    KeyspaceCreator creator = mock(KeyspaceCreator.class);
+
+    LifeCycleManager.ensureKeyspaces(session, config, creator);
+
+    verify(creator, times(1)).ensureKeyspace(session, CqlIdentifier.fromInternal("shop"));
   }
 
   private static TableConfig makeTableConfig(

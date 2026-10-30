@@ -1069,4 +1069,37 @@ class CassandraSinkConfigTest {
     assertThat(tableConfig.getTable()).isEqualTo(CqlIdentifier.fromInternal(table));
     assertThat(tableConfig.getMapping()).isEqualTo(mapping);
   }
+
+  private static Map<String, String> astraBase(String password) {
+    Map<String, String> props = new HashMap<>();
+    props.put(SECURE_CONNECT_BUNDLE_OPT, "/location/to/bundle");
+    props.put("topics", "orders");
+    props.put("topic.orders.shop.orders.mapping", "id=key.id,name=value.name");
+    props.put("createKeyspace", "true");
+    props.put("auth.username", "token");
+    props.put("auth.password", password);
+    return props;
+  }
+
+  @Test
+  void should_reject_astra_create_keyspace_without_astracs_token() {
+    assertThatThrownBy(() -> new CassandraSinkConfig(astraBase("clientSecret")))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining(
+            "createKeyspace on Astra requires an AstraCS application token in auth.password")
+        .satisfies(e -> assertThat(e.toString()).doesNotContain("clientSecret"));
+  }
+
+  @Test
+  void should_accept_astra_create_keyspace_with_astracs_token() {
+    assertThatCode(() -> new CassandraSinkConfig(astraBase("AstraCS:x:y")))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void should_not_check_astra_token_when_create_keyspace_off() {
+    Map<String, String> props = astraBase("clientSecret");
+    props.remove("createKeyspace");
+    assertThatCode(() -> new CassandraSinkConfig(props)).doesNotThrowAnyException();
+  }
 }

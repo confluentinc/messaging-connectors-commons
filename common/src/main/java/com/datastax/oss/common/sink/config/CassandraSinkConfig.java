@@ -115,7 +115,7 @@ public class CassandraSinkConfig {
   static final String KEYSPACE_OPT = "keyspace";
 
   public static final String SECURE_CONNECT_BUNDLE_OPT = "cloud.secureConnectBundle";
-  static final String SECURE_CONNECT_BUNDLE_DRIVER_SETTING =
+  public static final String SECURE_CONNECT_BUNDLE_DRIVER_SETTING =
       withDriverPrefix(DefaultDriverOption.CLOUD_SECURE_CONNECT_BUNDLE);
 
   static final List<String> JAVA_DRIVER_SETTINGS_LIST_TYPE =
@@ -323,6 +323,7 @@ public class CassandraSinkConfig {
         sslConfig = new SslConfig(sslSettings);
       }
       authConfig = new AuthenticatorConfig(authSettings);
+      validateAstraToken();
       topicConfigs = new HashMap<>();
       topicSettings.forEach(
           (name, topicConfigMap) ->
@@ -383,6 +384,13 @@ public class CassandraSinkConfig {
             settings.get(name),
             "mapping must not be set when mappingMode=IMPLICIT; use mappingMode=EXPLICIT");
       }
+    }
+  }
+
+  private void validateAstraToken() {
+    if (isCloud() && isCreateKeyspace() && !authConfig.getPassword().startsWith("AstraCS:")) {
+      throw new ConfigException(
+          "createKeyspace on Astra requires an AstraCS application token in auth.password");
     }
   }
 

@@ -17,6 +17,7 @@ package com.datastax.oss.common.sink.state;
 
 import static com.datastax.dse.driver.api.core.config.DseDriverOption.AUTH_PROVIDER_SASL_PROPERTIES;
 import static com.datastax.dse.driver.api.core.config.DseDriverOption.AUTH_PROVIDER_SERVICE;
+import static com.datastax.oss.common.sink.config.CassandraSinkConfig.SECURE_CONNECT_BUNDLE_DRIVER_SETTING;
 import static com.datastax.oss.common.sink.config.TableConfig.MAPPING_OPT;
 import static com.datastax.oss.common.sink.util.UUIDUtil.generateClientId;
 import static com.datastax.oss.driver.api.core.config.DefaultDriverOption.AUTH_PROVIDER_CLASS;
@@ -41,6 +42,11 @@ import com.datastax.oss.common.sink.config.ContactPointsValidator;
 import com.datastax.oss.common.sink.config.SslConfig;
 import com.datastax.oss.common.sink.config.TableConfig;
 import com.datastax.oss.common.sink.config.TopicConfig;
+import com.datastax.oss.common.sink.schema.AstraBundle;
+import com.datastax.oss.common.sink.schema.AstraDevOpsClient;
+import com.datastax.oss.common.sink.schema.AstraKeyspaceCreator;
+import com.datastax.oss.common.sink.schema.CqlKeyspaceCreator;
+import com.datastax.oss.common.sink.schema.KeyspaceCreator;
 import com.datastax.oss.common.sink.ssl.SessionBuilder;
 import com.datastax.oss.common.sink.util.SinkUtil;
 import com.datastax.oss.common.sink.util.StringUtil;
@@ -74,9 +80,11 @@ import java.net.InetSocketAddress;
 import java.nio.file.Path;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -92,6 +100,7 @@ import org.slf4j.LoggerFactory;
  */
 public class LifeCycleManager {
 
+  private static final int ASTRA_API_TIMEOUT_MILLIS = 30_000;
   private static final Logger log = LoggerFactory.getLogger(LifeCycleManager.class);
   private static final ConcurrentMap<String, InstanceState> INSTANCE_STATES =
       new ConcurrentHashMap<>();
@@ -404,6 +413,37 @@ public class LifeCycleManager {
     return table.getColumns().values().stream().anyMatch(c -> c.getType() == DataTypes.COUNTER);
   }
 
+  /** Returns the keyspace creator for the config, or null when createKeyspace is off. */
+  @VisibleForTesting
+  @Nullable
+  static KeyspaceCreator keyspaceCreatorFor(CassandraSinkConfig config) {
+    if (!config.isCreateKeyspace()) {
+      return null;
+    }
+    if (config.isCloud()) {
+      String bundle = config.getJavaDriverSettings().get(SECURE_CONNECT_BUNDLE_DRIVER_SETTING);
+      return new AstraKeyspaceCreator(
+          new AstraDevOpsClient(
+              AstraDevOpsClient.DEFAULT_BASE_URL,
+              config.getAuthenticatorConfig().getPassword(),
+              ASTRA_API_TIMEOUT_MILLIS),
+          AstraBundle.databaseId(bundle));
+    }
+    return new CqlKeyspaceCreator(config.getKeyspaceReplicationFactor());
+  }
+
+  @VisibleForTesting
+  static void ensureKeyspaces(
+      CqlSession session, CassandraSinkConfig config, KeyspaceCreator creator) {
+    Set<CqlIdentifier> keyspaces = new LinkedHashSet<>();
+    config.getKeyspace().ifPresent(ks -> keyspaces.add(CqlIdentifier.fromInternal(ks)));
+    config
+        .getTopicConfigs()
+        .values()
+        .forEach(t -> t.getTableConfigs().forEach(tc -> keyspaces.add(tc.getKeyspace())));
+    keyspaces.forEach(ks -> creator.ensureKeyspace(session, ks));
+  }
+
   /**
    * Perform heavy lifting of creating an InstanceState:
    *
@@ -424,6 +464,11 @@ public class LifeCycleManager {
    */
   @NonNull
   private static InstanceState buildInstanceState(CqlSession session, CassandraSinkConfig config) {
+
+    KeyspaceCreator keyspaceCreator = keyspaceCreatorFor(config);
+    if (keyspaceCreator != null) {
+      ensureKeyspaces(session, config, keyspaceCreator);
+    }
 
     // Compute the primary keys of all tables being mapped to (across topics).
     Map<String, List<CqlIdentifier>> primaryKeys = new HashMap<>();
