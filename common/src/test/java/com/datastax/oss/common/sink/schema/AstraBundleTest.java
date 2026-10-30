@@ -18,8 +18,10 @@ package com.datastax.oss.common.sink.schema;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -66,5 +68,32 @@ class AstraBundleTest {
     assertThatThrownBy(() -> AstraBundle.databaseId(zip))
         .isInstanceOf(FatalSchemaException.class)
         .hasMessageContaining("database id");
+  }
+
+  @Test
+  void should_not_expose_url_query_string_in_errors() throws IOException {
+    HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+    server.createContext(
+        "/",
+        exchange -> {
+          exchange.sendResponseHeaders(404, -1);
+          exchange.close();
+        });
+    server.start();
+    try {
+      String base = "http://127.0.0.1:" + server.getAddress().getPort() + "/scb.zip";
+
+      assertThatThrownBy(() -> AstraBundle.databaseId(base + "?X-Amz-Signature=secret"))
+          .isInstanceOf(FatalSchemaException.class)
+          .hasMessageContaining(base)
+          .satisfies(
+              e -> {
+                for (Throwable t = e; t != null; t = t.getCause()) {
+                  assertThat(String.valueOf(t.getMessage())).doesNotContain("secret");
+                }
+              });
+    } finally {
+      server.stop(0);
+    }
   }
 }

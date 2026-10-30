@@ -57,7 +57,15 @@ public final class AstraBundle {
         return databaseId(in);
       }
     } catch (IOException e) {
-      throw new FatalSchemaException("Cannot read secure connect bundle " + location, e);
+      int query = location.indexOf('?');
+      if (query < 0) {
+        throw new FatalSchemaException("Cannot read secure connect bundle " + location, e);
+      }
+      // The query string may hold a signature, and the cause message may repeat the full URL.
+      throw new FatalSchemaException(
+          String.format(
+              "Cannot read secure connect bundle %s (%s)",
+              location.substring(0, query), e.getClass().getSimpleName()));
     }
   }
 

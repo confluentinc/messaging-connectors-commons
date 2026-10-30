@@ -15,6 +15,7 @@
  */
 package com.datastax.oss.common.sink.schema;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
@@ -60,7 +61,16 @@ public class AstraDevOpsClient {
         throw unexpected(code, action);
       }
       try (InputStream in = conn.getInputStream()) {
-        JsonNode status = new ObjectMapper().readTree(in).get("status");
+        JsonNode root;
+        try {
+          root = new ObjectMapper().readTree(in);
+        } catch (JsonProcessingException e) {
+          throw new FatalSchemaException(
+              String.format(
+                  "Received an unexpected response from the Astra DevOps API trying to %s", action),
+              e);
+        }
+        JsonNode status = root == null ? null : root.get("status");
         if (status == null) {
           throw new FatalSchemaException("Astra DevOps API returned no status for " + databaseId);
         }

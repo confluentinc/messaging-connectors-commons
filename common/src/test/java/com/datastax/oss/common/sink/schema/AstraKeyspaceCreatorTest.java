@@ -55,7 +55,7 @@ class AstraKeyspaceCreatorTest {
         .thenReturn(Optional.empty(), Optional.empty(), Optional.of(mock(KeyspaceMetadata.class)));
     when(client.getDatabaseStatus("db1")).thenReturn("MAINTENANCE", "MAINTENANCE", "ACTIVE");
 
-    new AstraKeyspaceCreator(client, "db1", 1, 5000, 5000).ensureKeyspace(session, SHOP);
+    new AstraKeyspaceCreator(client, "db1", 1, 5000).ensureKeyspace(session, SHOP);
 
     InOrder order = inOrder(client);
     order.verify(client).createKeyspace("db1", "shop");
@@ -67,7 +67,7 @@ class AstraKeyspaceCreatorTest {
   void should_skip_when_keyspace_present() {
     when(metadata.getKeyspace(SHOP)).thenReturn(Optional.of(mock(KeyspaceMetadata.class)));
 
-    new AstraKeyspaceCreator(client, "db1", 1, 5000, 5000).ensureKeyspace(session, SHOP);
+    new AstraKeyspaceCreator(client, "db1", 1, 5000).ensureKeyspace(session, SHOP);
 
     verify(client, never()).createKeyspace(any(), any());
   }
@@ -78,7 +78,7 @@ class AstraKeyspaceCreatorTest {
     when(client.getDatabaseStatus("db1")).thenReturn("MAINTENANCE");
 
     assertThatThrownBy(
-            () -> new AstraKeyspaceCreator(client, "db1", 1, 30, 30).ensureKeyspace(session, SHOP))
+            () -> new AstraKeyspaceCreator(client, "db1", 1, 30).ensureKeyspace(session, SHOP))
         .isInstanceOf(FatalSchemaException.class)
         .hasMessageContaining("ACTIVE");
   }
@@ -89,8 +89,24 @@ class AstraKeyspaceCreatorTest {
     when(client.getDatabaseStatus("db1")).thenReturn("ACTIVE");
 
     assertThatThrownBy(
-            () -> new AstraKeyspaceCreator(client, "db1", 1, 30, 30).ensureKeyspace(session, SHOP))
+            () -> new AstraKeyspaceCreator(client, "db1", 1, 30).ensureKeyspace(session, SHOP))
         .isInstanceOf(FatalSchemaException.class)
         .hasMessageContaining("shop");
+  }
+
+  @Test
+  void should_wait_for_keyspace_within_full_budget_after_early_active() {
+    long visibleAt = System.nanoTime() + 200_000_000L;
+    when(metadata.getKeyspace(SHOP))
+        .thenAnswer(
+            i ->
+                System.nanoTime() > visibleAt
+                    ? Optional.of(mock(KeyspaceMetadata.class))
+                    : Optional.empty());
+    when(client.getDatabaseStatus("db1")).thenReturn("ACTIVE");
+
+    new AstraKeyspaceCreator(client, "db1", 5, 5000).ensureKeyspace(session, SHOP);
+
+    verify(client, times(1)).getDatabaseStatus("db1");
   }
 }

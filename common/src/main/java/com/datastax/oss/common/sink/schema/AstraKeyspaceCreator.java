@@ -21,30 +21,23 @@ import com.datastax.oss.driver.api.core.CqlSession;
 /** Creates keyspaces through the Astra DevOps API. */
 public class AstraKeyspaceCreator implements KeyspaceCreator {
   private static final long POLL_INTERVAL_MILLIS = 2_000;
-  private static final long ACTIVE_TIMEOUT_MILLIS = 5 * 60_000;
-  private static final long METADATA_TIMEOUT_MILLIS = 60_000;
+  private static final long TIMEOUT_MILLIS = 5 * 60_000;
 
   private final AstraDevOpsClient client;
   private final String databaseId;
   private final long pollIntervalMillis;
-  private final long activeTimeoutMillis;
-  private final long metadataTimeoutMillis;
+  private final long timeoutMillis;
 
   public AstraKeyspaceCreator(AstraDevOpsClient client, String databaseId) {
-    this(client, databaseId, POLL_INTERVAL_MILLIS, ACTIVE_TIMEOUT_MILLIS, METADATA_TIMEOUT_MILLIS);
+    this(client, databaseId, POLL_INTERVAL_MILLIS, TIMEOUT_MILLIS);
   }
 
   AstraKeyspaceCreator(
-      AstraDevOpsClient client,
-      String databaseId,
-      long pollIntervalMillis,
-      long activeTimeoutMillis,
-      long metadataTimeoutMillis) {
+      AstraDevOpsClient client, String databaseId, long pollIntervalMillis, long timeoutMillis) {
     this.client = client;
     this.databaseId = databaseId;
     this.pollIntervalMillis = pollIntervalMillis;
-    this.activeTimeoutMillis = activeTimeoutMillis;
-    this.metadataTimeoutMillis = metadataTimeoutMillis;
+    this.timeoutMillis = timeoutMillis;
   }
 
   @Override
@@ -54,27 +47,26 @@ public class AstraKeyspaceCreator implements KeyspaceCreator {
     }
     client.createKeyspace(databaseId, keyspace.asInternal());
 
-    long deadline = System.nanoTime() + activeTimeoutMillis * 1_000_000;
-    while (!"ACTIVE".equals(client.getDatabaseStatus(databaseId))) {
-      if (System.nanoTime() > deadline) {
-        throw new FatalSchemaException(
-            String.format(
-                "Database %s did not become ACTIVE after creating keyspace %s",
-                databaseId, keyspace.asInternal()));
-      }
-      pause();
-    }
-
-    deadline = System.nanoTime() + metadataTimeoutMillis * 1_000_000;
+    // ACTIVE may be reported before the database enters MAINTENANCE, so the keyspace showing up
+    // in the driver metadata is what ends the wait.
+    long deadline = System.nanoTime() + timeoutMillis * 1_000_000;
+    boolean active = false;
     while (true) {
-      session.refreshSchema();
-      if (session.getMetadata().getKeyspace(keyspace).isPresent()) {
-        return;
+      active = active || "ACTIVE".equals(client.getDatabaseStatus(databaseId));
+      if (active) {
+        session.refreshSchema();
+        if (session.getMetadata().getKeyspace(keyspace).isPresent()) {
+          return;
+        }
       }
       if (System.nanoTime() > deadline) {
         throw new FatalSchemaException(
-            String.format(
-                "Keyspace %s did not become visible after creation", keyspace.asInternal()));
+            active
+                ? String.format(
+                    "Keyspace %s did not become visible after creation", keyspace.asInternal())
+                : String.format(
+                    "Database %s did not become ACTIVE after creating keyspace %s",
+                    databaseId, keyspace.asInternal()));
       }
       pause();
     }

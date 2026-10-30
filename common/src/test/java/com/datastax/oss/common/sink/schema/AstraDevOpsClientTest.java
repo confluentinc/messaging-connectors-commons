@@ -123,4 +123,15 @@ class AstraDevOpsClientTest {
     assertThat(method.get()).isEqualTo("GET");
     assertThat(path.get()).isEqualTo("/v2/databases/db1");
   }
+
+  @Test
+  void should_report_unexpected_response_when_status_body_is_not_json() {
+    status = 200;
+    body = "<html>gateway</html>";
+
+    assertThatThrownBy(() -> client().getDatabaseStatus("db1"))
+        .isInstanceOf(FatalSchemaException.class)
+        .hasMessageContaining("unexpected response from the Astra DevOps API")
+        .satisfies(e -> assertThat(e.getMessage()).doesNotContain("PrivateLink"));
+  }
 }
