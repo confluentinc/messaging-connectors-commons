@@ -39,6 +39,7 @@ import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.common.sink.config.AuthenticatorConfig;
 import com.datastax.oss.common.sink.config.CassandraSinkConfig;
 import com.datastax.oss.common.sink.config.ContactPointsValidator;
+import com.datastax.oss.common.sink.config.MappingMode;
 import com.datastax.oss.common.sink.config.SslConfig;
 import com.datastax.oss.common.sink.config.TableConfig;
 import com.datastax.oss.common.sink.config.TopicConfig;
@@ -507,6 +508,7 @@ public class LifeCycleManager {
     if (keyspaceCreator != null) {
       ensureKeyspaces(session, config, keyspaceCreator);
     }
+    checkImplicitKeyspace(session, config);
 
     // Compute the primary keys of all tables being mapped to (across topics).
     Map<String, List<CqlIdentifier>> primaryKeys = new HashMap<>();
@@ -575,6 +577,19 @@ public class LifeCycleManager {
         });
 
     return new InstanceState(config, session, topicStates, metricRegistry);
+  }
+
+  /** Fails like an explicit binding when the implicit keyspace is missing and not created. */
+  @VisibleForTesting
+  static void checkImplicitKeyspace(CqlSession session, CassandraSinkConfig config) {
+    if (config.getMappingMode() != MappingMode.IMPLICIT || config.isCreateKeyspace()) {
+      return;
+    }
+    CqlIdentifier keyspace = config.getKeyspaceIdentifier().get();
+    if (!session.getMetadata().getKeyspace(keyspace).isPresent()) {
+      throw new ConfigException(
+          String.format("Keyspace %s does not exist.", keyspace.asInternal()));
+    }
   }
 
   /** True for implicit bindings, or with createTable when only the table is missing. */

@@ -64,6 +64,17 @@ public class DdlSchemaReconciler implements SchemaReconciler {
 
   @Override
   public RecordMapper mapperFor(TableConfig tableConfig, AbstractSinkRecord record) {
+    if (record.value() == null) {
+      // A tombstone carries no value schema; deletes only need the prepared mapper.
+      RecordMapper existing = state.getRecordMapper(tableConfig);
+      if (existing == null) {
+        throw new SchemaMismatchException(
+            String.format(
+                "Tombstone: cannot apply a delete to %s before its first non-null record",
+                tableConfig.getKeyspaceAndTable()));
+      }
+      return existing;
+    }
     Object keyId = identity(record.keySchema());
     Object valueId = identity(record.valueSchema());
     Resolved cached = resolved.get(tableConfig);
@@ -185,6 +196,20 @@ public class DdlSchemaReconciler implements SchemaReconciler {
       AbstractSchema keySchema,
       AbstractSchema valueSchema,
       Map<CqlIdentifier, CqlIdentifier> mapping) {
+    String missingKeyColumns =
+        mapping
+            .entrySet()
+            .stream()
+            .filter(e -> !table.getColumn(e.getKey()).isPresent())
+            .filter(e -> isKeySourced(e.getValue()))
+            .map(e -> e.getKey().asCql(true))
+            .collect(Collectors.joining(", "));
+    if (!missingKeyColumns.isEmpty()) {
+      throw new SchemaMismatchException(
+          String.format(
+              "The primary key of table %s does not match the record key fields; missing key columns: %s",
+              tableConfig.getKeyspaceAndTable(), missingKeyColumns));
+    }
     List<String> alters =
         mapping
             .entrySet()
@@ -204,6 +229,11 @@ public class DdlSchemaReconciler implements SchemaReconciler {
               "Table %s has no column for some record fields; add them with: %s",
               tableConfig.getKeyspaceAndTable(), String.join("; ", alters)));
     }
+  }
+
+  private static boolean isKeySourced(CqlIdentifier source) {
+    String name = source.asInternal();
+    return name.equals(KEY) || name.startsWith(KEY + '.');
   }
 
   private static DataType sourceType(

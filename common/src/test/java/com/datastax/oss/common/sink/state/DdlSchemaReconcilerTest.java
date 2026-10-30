@@ -145,6 +145,14 @@ class DdlSchemaReconcilerTest {
     when(record.topic()).thenReturn(TOPIC);
     when(record.keySchema()).thenReturn(key);
     when(record.valueSchema()).thenReturn(value);
+    when(record.value()).thenReturn(new Object());
+    return record;
+  }
+
+  private AbstractSinkRecord tombstone() {
+    AbstractSinkRecord record = mock(AbstractSinkRecord.class);
+    when(record.topic()).thenReturn(TOPIC);
+    when(record.keySchema()).thenReturn(keySchema);
     return record;
   }
 
@@ -426,5 +434,55 @@ class DdlSchemaReconcilerTest {
 
     verify(session).prepareAsync(startsWith("INSERT INTO shop.orders(id,name) VALUES"));
     assertThat(second).isNotSameAs(first).isSameAs(state.getRecordMapper(tableConfig));
+  }
+
+  @Test
+  void should_return_resolved_mapper_for_tombstone_without_ddl() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    TableConfig tableConfig = implicitPending("orders");
+    DdlSchemaReconciler reconciler = reconciler();
+    RecordMapper first = reconciler.mapperFor(tableConfig, record(keySchema, valueSchema));
+
+    assertThat(reconciler.mapperFor(tableConfig, tombstone())).isSameAs(first);
+    verify(session, never()).execute(any(Statement.class));
+    verify(session, times(1)).prepareAsync(startsWith("INSERT"));
+  }
+
+  @Test
+  void should_reject_tombstone_before_first_record_in_implicit_mode() {
+    TableConfig tableConfig = implicitPending("orders");
+
+    assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, tombstone()))
+        .isInstanceOf(SchemaMismatchException.class)
+        .hasMessageContaining(
+            "cannot apply a delete to shop.orders before its first non-null record");
+    verify(session, never()).execute(any(Statement.class));
+    verify(session, never()).prepareAsync(anyString());
+  }
+
+  @Test
+  void should_reject_tombstone_for_pending_explicit_binding() {
+    TableConfig tableConfig = pending("id=key.id, name=value.name, ts=value.ts");
+
+    assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, tombstone()))
+        .isInstanceOf(SchemaMismatchException.class)
+        .hasMessageContaining(
+            "cannot apply a delete to shop.orders before its first non-null record");
+    verify(session, never()).execute(any(Statement.class));
+    verify(session, never()).getMetadata();
+  }
+
+  @Test
+  void should_report_key_mismatch_without_alter_for_missing_key_column() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    TableConfig tableConfig = implicitPending("orders");
+    AbstractSchema key = struct("tenant", prim(AbstractSchema.Type.STRING, null));
+
+    assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(key, valueSchema)))
+        .isInstanceOf(SchemaMismatchException.class)
+        .hasMessageContaining("primary key of table shop.orders does not match the record key")
+        .hasMessageContaining("tenant")
+        .satisfies(e -> assertThat(e.getMessage()).doesNotContain("ALTER TABLE"));
+    verify(session, never()).execute(any(Statement.class));
   }
 }

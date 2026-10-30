@@ -439,6 +439,20 @@ class LifeCycleManagerTest {
   }
 
   @Test
+  void should_fail_start_when_implicit_keyspace_missing_and_create_keyspace_off() {
+    when(metadata.getKeyspace(CqlIdentifier.fromInternal("shop"))).thenReturn(Optional.empty());
+    Map<String, String> props = implicitProps("shop");
+
+    assertThatThrownBy(
+            () -> LifeCycleManager.checkImplicitKeyspace(session, new CassandraSinkConfig(props)))
+        .isInstanceOf(ConfigException.class)
+        .hasMessage("Keyspace shop does not exist.");
+    props.put("createKeyspace", "true");
+    LifeCycleManager.checkImplicitKeyspace(session, new CassandraSinkConfig(props));
+    LifeCycleManager.checkImplicitKeyspace(session, new CassandraSinkConfig(baseProps()));
+  }
+
+  @Test
   void should_always_leave_implicit_binding_pending() {
     CassandraSinkConfig config = new CassandraSinkConfig(implicitProps("ks"));
 
