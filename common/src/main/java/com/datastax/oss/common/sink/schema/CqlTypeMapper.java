@@ -22,10 +22,10 @@ import com.datastax.oss.driver.api.core.type.DataTypes;
 /** Maps Connect schemas to CQL types. */
 public final class CqlTypeMapper {
 
-  static final String DECIMAL = "org.apache.kafka.connect.data.Decimal";
-  static final String DATE = "org.apache.kafka.connect.data.Date";
-  static final String TIME = "org.apache.kafka.connect.data.Time";
-  static final String TIMESTAMP = "org.apache.kafka.connect.data.Timestamp";
+  public static final String DECIMAL = "org.apache.kafka.connect.data.Decimal";
+  public static final String DATE = "org.apache.kafka.connect.data.Date";
+  public static final String TIME = "org.apache.kafka.connect.data.Time";
+  public static final String TIMESTAMP = "org.apache.kafka.connect.data.Timestamp";
 
   private CqlTypeMapper() {}
 
