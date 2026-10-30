@@ -53,4 +53,14 @@ public interface AbstractSinkRecord {
    * @return the topic name.
    */
   public String topic();
+
+  /** Schema of the key, or null if schemaless. */
+  default AbstractSchema keySchema() {
+    return null;
+  }
+
+  /** Schema of the value, or null if schemaless. */
+  default AbstractSchema valueSchema() {
+    return null;
+  }
 }
