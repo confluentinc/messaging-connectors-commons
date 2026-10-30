@@ -968,6 +968,97 @@ class CassandraSinkConfigTest {
             "Setting ignoreErrors=false is deprecated, please replace with ignoreErrors=None"));
   }
 
+  private static Map<String, String> explicitBase() {
+    Map<String, String> props = new HashMap<>();
+    props.put(CONTACT_POINTS_OPT, "127.0.0.1");
+    props.put(DC_OPT, "dc1");
+    props.put("topics", "orders");
+    props.put("topic.orders.shop.orders.mapping", "id=key.id,name=value.name");
+    return props;
+  }
+
+  @Test
+  void should_default_schema_management_off() {
+    CassandraSinkConfig c = new CassandraSinkConfig(explicitBase());
+    assertThat(c.isCreateKeyspace()).isFalse();
+    assertThat(c.isCreateTable()).isFalse();
+    assertThat(c.isEvolveTable()).isFalse();
+    assertThat(c.getKeyspaceReplicationFactor()).isEqualTo(3);
+    assertThat(c.getMappingMode()).isEqualTo(MappingMode.EXPLICIT);
+    assertThat(c.getKeyspace()).isEmpty();
+    assertThat(c.isSchemaManagementEnabled()).isFalse();
+  }
+
+  @Test
+  void should_enable_schema_management_when_any_flag_set() {
+    for (String opt : new String[] {"createKeyspace", "createTable", "evolveTable"}) {
+      Map<String, String> props = explicitBase();
+      props.put(opt, "true");
+      assertThat(new CassandraSinkConfig(props).isSchemaManagementEnabled()).isTrue();
+    }
+  }
+
+  @Test
+  void should_read_schema_management_settings() {
+    Map<String, String> props = explicitBase();
+    props.put("createKeyspace", "true");
+    props.put("keyspaceReplicationFactor", "2");
+    props.put("keyspace", " shop ");
+    CassandraSinkConfig c = new CassandraSinkConfig(props);
+    assertThat(c.isCreateKeyspace()).isTrue();
+    assertThat(c.getKeyspaceReplicationFactor()).isEqualTo(2);
+    assertThat(c.getKeyspace()).contains("shop");
+    props.put("keyspace", "  ");
+    assertThat(new CassandraSinkConfig(props).getKeyspace()).isEmpty();
+  }
+
+  @Test
+  void should_reject_replication_factor_below_one() {
+    Map<String, String> props = explicitBase();
+    props.put("keyspaceReplicationFactor", "0");
+    assertThatThrownBy(() -> new CassandraSinkConfig(props))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining("keyspaceReplicationFactor");
+  }
+
+  @Test
+  void should_reject_unknown_mapping_mode() {
+    Map<String, String> props = explicitBase();
+    props.put("mappingMode", "implicit");
+    assertThatThrownBy(() -> new CassandraSinkConfig(props))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining("mappingMode");
+  }
+
+  @Test
+  void should_reject_implicit_without_keyspace() {
+    Map<String, String> props = explicitBase();
+    props.remove("topic.orders.shop.orders.mapping");
+    props.put("mappingMode", "IMPLICIT");
+    assertThatThrownBy(() -> new CassandraSinkConfig(props))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining("keyspace is required when mappingMode=IMPLICIT");
+  }
+
+  @Test
+  void should_reject_implicit_with_mapping() {
+    Map<String, String> props = explicitBase();
+    props.put("mappingMode", "IMPLICIT");
+    props.put("keyspace", "shop");
+    assertThatThrownBy(() -> new CassandraSinkConfig(props))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining("mapping must not be set when mappingMode=IMPLICIT")
+        .hasMessageContaining("mappingMode=EXPLICIT");
+  }
+
+  @Test
+  void should_still_require_mapping_in_explicit_mode() {
+    Map<String, String> props = explicitBase();
+    props.remove("topic.orders.shop.orders.mapping");
+    props.put("topic.orders.shop.orders.ttl", "10");
+    assertThatThrownBy(() -> new CassandraSinkConfig(props)).isInstanceOf(ConfigException.class);
+  }
+
   private void assertTopic(
       String keyspace,
       String table,

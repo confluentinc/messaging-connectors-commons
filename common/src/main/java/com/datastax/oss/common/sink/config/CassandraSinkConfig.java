@@ -107,6 +107,13 @@ public class CassandraSinkConfig {
 
   static final String IGNORE_ERRORS = "ignoreErrors";
 
+  static final String CREATE_KEYSPACE_OPT = "createKeyspace";
+  static final String CREATE_TABLE_OPT = "createTable";
+  static final String EVOLVE_TABLE_OPT = "evolveTable";
+  static final String KEYSPACE_REPLICATION_FACTOR_OPT = "keyspaceReplicationFactor";
+  static final String MAPPING_MODE_OPT = "mappingMode";
+  static final String KEYSPACE_OPT = "keyspace";
+
   public static final String SECURE_CONNECT_BUNDLE_OPT = "cloud.secureConnectBundle";
   static final String SECURE_CONNECT_BUNDLE_DRIVER_SETTING =
       withDriverPrefix(DefaultDriverOption.CLOUD_SECURE_CONNECT_BUNDLE);
@@ -210,7 +217,46 @@ public class CassandraSinkConfig {
               ConfigDef.Type.STRING,
               "",
               ConfigDef.Importance.HIGH,
-              "The location of the cloud secure bundle used to connect to Datastax Apache Cassandra as a service.");
+              "The location of the cloud secure bundle used to connect to Datastax Apache Cassandra as a service.")
+          .define(
+              CREATE_KEYSPACE_OPT,
+              ConfigDef.Type.BOOLEAN,
+              false,
+              ConfigDef.Importance.LOW,
+              "Whether to create the keyspace if it does not exist")
+          .define(
+              CREATE_TABLE_OPT,
+              ConfigDef.Type.BOOLEAN,
+              false,
+              ConfigDef.Importance.LOW,
+              "Whether to create the table if it does not exist")
+          .define(
+              EVOLVE_TABLE_OPT,
+              ConfigDef.Type.BOOLEAN,
+              false,
+              ConfigDef.Importance.LOW,
+              "Whether to add missing columns to an existing table")
+          .define(
+              KEYSPACE_REPLICATION_FACTOR_OPT,
+              ConfigDef.Type.INT,
+              3,
+              ConfigDef.Range.atLeast(1),
+              ConfigDef.Importance.LOW,
+              "Replication factor used when creating a keyspace (ignored for cloud deployments)")
+          .define(
+              MAPPING_MODE_OPT,
+              ConfigDef.Type.STRING,
+              MappingMode.EXPLICIT.name(),
+              ConfigDef.ValidString.in(MappingMode.EXPLICIT.name(), MappingMode.IMPLICIT.name()),
+              ConfigDef.Importance.LOW,
+              "EXPLICIT uses the mapping setting of each topic; "
+                  + "IMPLICIT maps record fields to same-named columns of a table named after the topic")
+          .define(
+              KEYSPACE_OPT,
+              ConfigDef.Type.STRING,
+              null,
+              ConfigDef.Importance.LOW,
+              "Keyspace used for all topics when mappingMode=IMPLICIT");
   private static final Function<String, String> TO_SECONDS_CONVERTER =
       v -> String.format("%s seconds", v);
 
@@ -256,6 +302,7 @@ public class CassandraSinkConfig {
       // Put the global settings in an AbstractConfig and make/store a TopicConfig for every
       // topic settings map.
       globalConfig = new AbstractConfig(GLOBAL_CONFIG_DEF, globalSettings, false);
+      validateSchemaManagement(settings);
 
       populateDriverSettingsWithConnectorSettings(globalSettings);
 
@@ -317,6 +364,25 @@ public class CassandraSinkConfig {
     } catch (org.apache.kafka.common.config.ConfigException err) {
       // convert Kafka config framework exception into our exception
       throw new ConfigException(err.getMessage(), err);
+    }
+  }
+
+  private void validateSchemaManagement(Map<String, String> settings) {
+    if (getMappingMode() != MappingMode.IMPLICIT) {
+      return;
+    }
+    if (!getKeyspace().isPresent()) {
+      throw new ConfigException(
+          KEYSPACE_OPT, null, "keyspace is required when mappingMode=IMPLICIT");
+    }
+    for (String name : settings.keySet()) {
+      Matcher m = TOPIC_KS_TABLE_SETTING_PATTERN.matcher(name);
+      if (m.matches() && "mapping".equals(m.group(4))) {
+        throw new ConfigException(
+            name,
+            settings.get(name),
+            "mapping must not be set when mappingMode=IMPLICIT; use mappingMode=EXPLICIT");
+      }
     }
   }
 
@@ -599,6 +665,39 @@ public class CassandraSinkConfig {
   @Nullable
   public SslConfig getSslConfig() {
     return sslConfig;
+  }
+
+  public boolean isCreateKeyspace() {
+    return globalConfig.getBoolean(CREATE_KEYSPACE_OPT);
+  }
+
+  public boolean isCreateTable() {
+    return globalConfig.getBoolean(CREATE_TABLE_OPT);
+  }
+
+  public boolean isEvolveTable() {
+    return globalConfig.getBoolean(EVOLVE_TABLE_OPT);
+  }
+
+  public int getKeyspaceReplicationFactor() {
+    return globalConfig.getInt(KEYSPACE_REPLICATION_FACTOR_OPT);
+  }
+
+  public MappingMode getMappingMode() {
+    return MappingMode.valueOf(globalConfig.getString(MAPPING_MODE_OPT));
+  }
+
+  public Optional<String> getKeyspace() {
+    return Optional.ofNullable(globalConfig.getString(KEYSPACE_OPT))
+        .map(String::trim)
+        .filter(v -> !v.isEmpty());
+  }
+
+  public boolean isSchemaManagementEnabled() {
+    return isCreateKeyspace()
+        || isCreateTable()
+        || isEvolveTable()
+        || getMappingMode() == MappingMode.IMPLICIT;
   }
 
   public int getMaxNumberOfRecordsInBatch() {
