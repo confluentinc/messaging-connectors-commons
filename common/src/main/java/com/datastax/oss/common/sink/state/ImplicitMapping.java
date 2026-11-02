@@ -21,14 +21,13 @@ import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.metadata.schema.TableMetadata;
 import edu.umd.cs.findbugs.annotations.Nullable;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.stream.Collectors;
 
-/** Derives a column mapping from record field names: column = field name. */
+/** Derives a column mapping from record field names: column = lower-cased field name. */
 public final class ImplicitMapping {
 
   private ImplicitMapping() {}
@@ -48,43 +47,54 @@ public final class ImplicitMapping {
       return;
     }
     for (AbstractField field : schema.fields()) {
-      mapping.putIfAbsent(
-          CqlIdentifier.fromInternal(field.name()),
-          CqlIdentifier.fromInternal(prefix + field.name()));
+      CqlIdentifier column = CqlIdentifier.fromInternal(field.name().toLowerCase(Locale.ROOT));
+      CqlIdentifier previous = mapping.get(column);
+      if (previous == null) {
+        mapping.put(column, CqlIdentifier.fromInternal(prefix + field.name()));
+      } else if (previous.asInternal().startsWith(prefix)) {
+        throw new ConfigException(
+            String.format(
+                "Fields %s and %s both map to column %s",
+                previous.asInternal().substring(prefix.length()),
+                field.name(),
+                column.asCql(true)));
+      }
+      // Otherwise a key field already provides this column.
     }
   }
 
-  /** Binds each column to the table's exact column, else to its only case-insensitive match. */
+  /**
+   * Binds each column to the table's same-named column, else to its only case-insensitive match.
+   */
   public static Map<CqlIdentifier, CqlIdentifier> resolveColumns(
       Map<CqlIdentifier, CqlIdentifier> mapping, TableMetadata table, String tableName) {
-    Set<CqlIdentifier> taken = new HashSet<>();
-    mapping.keySet().stream().filter(c -> table.getColumn(c).isPresent()).forEach(taken::add);
     Map<CqlIdentifier, CqlIdentifier> resolved = new LinkedHashMap<>();
-    for (Map.Entry<CqlIdentifier, CqlIdentifier> entry : mapping.entrySet()) {
-      CqlIdentifier column = entry.getKey();
-      if (!taken.contains(column)) {
-        List<CqlIdentifier> matches =
-            table
-                .getColumns()
-                .keySet()
-                .stream()
-                .filter(c -> c.asInternal().equalsIgnoreCase(column.asInternal()))
-                .collect(Collectors.toList());
-        if (matches.size() > 1) {
-          throw new ConfigException(
-              String.format(
-                  "Field %s matches several columns of table %s ignoring case: %s",
-                  column.asInternal(),
-                  tableName,
-                  matches.stream().map(c -> c.asCql(true)).collect(Collectors.joining(", "))));
-        }
-        if (matches.size() == 1 && taken.add(matches.get(0))) {
-          resolved.put(matches.get(0), entry.getValue());
-          continue;
-        }
-      }
-      resolved.put(column, entry.getValue());
-    }
+    mapping.forEach(
+        (column, source) -> resolved.put(resolveColumn(column, source, table, tableName), source));
     return resolved;
+  }
+
+  private static CqlIdentifier resolveColumn(
+      CqlIdentifier column, CqlIdentifier source, TableMetadata table, String tableName) {
+    if (table.getColumn(column).isPresent()) {
+      return column;
+    }
+    List<CqlIdentifier> matches =
+        table
+            .getColumns()
+            .keySet()
+            .stream()
+            .filter(c -> c.asInternal().equalsIgnoreCase(column.asInternal()))
+            .collect(Collectors.toList());
+    if (matches.size() > 1) {
+      String field = source.asInternal().substring(source.asInternal().indexOf('.') + 1);
+      throw new ConfigException(
+          String.format(
+              "Field %s matches several columns of table %s ignoring case: %s",
+              field,
+              tableName,
+              matches.stream().map(c -> c.asCql(true)).collect(Collectors.joining(", "))));
+    }
+    return matches.isEmpty() ? column : matches.get(0);
   }
 }

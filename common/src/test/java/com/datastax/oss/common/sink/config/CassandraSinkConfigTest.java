@@ -1124,7 +1124,7 @@ class CassandraSinkConfigTest {
   }
 
   @Test
-  void should_name_implicit_table_exactly_like_topic() {
+  void should_name_implicit_table_like_lower_cased_topic() {
     Map<String, String> props = implicitBase();
     props.put("topics", "orders-v1.raw,Orders");
     CassandraSinkConfig c = new CassandraSinkConfig(props);
@@ -1138,11 +1138,11 @@ class CassandraSinkConfigTest {
                 .getKeyspaceAndTable())
         .isEqualTo("shop.\"orders-v1.raw\"");
     assertThat(c.getTopicConfigs().get("Orders").getTableConfigs().iterator().next().getTable())
-        .isEqualTo(CqlIdentifier.fromInternal("Orders"));
+        .isEqualTo(CqlIdentifier.fromInternal("orders"));
   }
 
   @Test
-  void should_parse_quoted_implicit_keyspace_like_bindings() {
+  void should_keep_case_of_quoted_implicit_keyspace() {
     Map<String, String> props = implicitBase();
     props.put("keyspace", "\"Shop\"");
     CassandraSinkConfig c = new CassandraSinkConfig(props);
@@ -1150,6 +1150,17 @@ class CassandraSinkConfigTest {
     assertThat(c.getKeyspaceIdentifier()).contains(CqlIdentifier.fromInternal("Shop"));
     assertThat(c.getTopicConfigs().get("orders").getTableConfigs().iterator().next().getKeyspace())
         .isEqualTo(CqlIdentifier.fromInternal("Shop"));
+  }
+
+  @Test
+  void should_lower_case_unquoted_implicit_keyspace() {
+    Map<String, String> props = implicitBase();
+    props.put("keyspace", "Shop");
+    CassandraSinkConfig c = new CassandraSinkConfig(props);
+
+    assertThat(c.getKeyspaceIdentifier()).contains(CqlIdentifier.fromInternal("shop"));
+    assertThat(c.getTopicConfigs().get("orders").getTableConfigs().iterator().next().getKeyspace())
+        .isEqualTo(CqlIdentifier.fromInternal("shop"));
   }
 
   @Test

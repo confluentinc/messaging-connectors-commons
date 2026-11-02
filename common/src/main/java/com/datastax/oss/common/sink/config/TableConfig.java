@@ -30,6 +30,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -88,8 +89,8 @@ public class TableConfig extends AbstractConfig {
     super(makeTableConfigDef(topicName, keyspace, table, implicit), settings, false);
 
     this.topicName = topicName;
-    this.keyspace = parseLoosely(keyspace);
-    this.table = implicit ? CqlIdentifier.fromInternal(table) : parseLoosely(table);
+    this.keyspace = implicit ? parseCql(keyspace) : parseLoosely(keyspace);
+    this.table = implicit ? parseCql(table) : parseLoosely(table);
     this.implicit = implicit;
     mappingString = getString(getTableSettingPath(topicName, keyspace, table, MAPPING_OPT));
     mapping = implicit ? Collections.emptyMap() : parseMappingString(mappingString);
@@ -378,6 +379,14 @@ public class TableConfig extends AbstractConfig {
     return value.startsWith("\"")
         ? CqlIdentifier.fromCql(value)
         : CqlIdentifier.fromInternal(value);
+  }
+
+  /** As in CQL: unquoted names are lower-cased, quoted names keep their case. */
+  @NonNull
+  static CqlIdentifier parseCql(@NonNull String value) {
+    return value.startsWith("\"")
+        ? CqlIdentifier.fromCql(value)
+        : CqlIdentifier.fromInternal(value.toLowerCase(Locale.ROOT));
   }
 
   @NonNull

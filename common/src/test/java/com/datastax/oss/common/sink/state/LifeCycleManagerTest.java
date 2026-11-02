@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import com.datastax.oss.common.sink.ConfigException;
@@ -377,6 +378,18 @@ class LifeCycleManagerTest {
     LifeCycleManager.ensureKeyspaces(session, config, creator);
 
     verify(creator, times(1)).ensureKeyspace(session, CqlIdentifier.fromInternal("shop"));
+  }
+
+  @Test
+  void should_ignore_global_keyspace_in_explicit_mode() {
+    Map<String, String> props = baseProps();
+    props.put("keyspace", "unused");
+    KeyspaceCreator creator = mock(KeyspaceCreator.class);
+
+    LifeCycleManager.ensureKeyspaces(session, new CassandraSinkConfig(props), creator);
+
+    verify(creator, times(1)).ensureKeyspace(session, CqlIdentifier.fromInternal("shop"));
+    verifyNoMoreInteractions(creator);
   }
 
   @Test

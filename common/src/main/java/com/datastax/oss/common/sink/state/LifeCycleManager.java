@@ -465,7 +465,9 @@ public class LifeCycleManager {
   static void ensureKeyspaces(
       CqlSession session, CassandraSinkConfig config, KeyspaceCreator creator) {
     Set<CqlIdentifier> keyspaces = new LinkedHashSet<>();
-    config.getKeyspaceIdentifier().ifPresent(keyspaces::add);
+    if (config.getMappingMode() == MappingMode.IMPLICIT) {
+      config.getKeyspaceIdentifier().ifPresent(keyspaces::add);
+    }
     config
         .getTopicConfigs()
         .values()
@@ -605,7 +607,7 @@ public class LifeCycleManager {
     if (tableConfig.isImplicit()) {
       return true;
     }
-    if (!config.isCreateTable() && !config.isEvolveTable()
+    if ((!config.isCreateTable() && !config.isEvolveTable())
         || !session.getMetadata().getKeyspace(tableConfig.getKeyspace()).isPresent()) {
       return false;
     }

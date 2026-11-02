@@ -62,6 +62,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -325,7 +326,7 @@ class DdlSchemaReconcilerTest {
   }
 
   private void assertImplicitCreate(String topic, String qualified) {
-    when(keyspace.getTable(CqlIdentifier.fromInternal(topic)))
+    when(keyspace.getTable(CqlIdentifier.fromInternal(topic.toLowerCase(Locale.ROOT))))
         .thenReturn(Optional.empty(), Optional.of(table));
     TableConfig tableConfig = implicitPending(topic);
 
@@ -343,13 +344,24 @@ class DdlSchemaReconcilerTest {
   }
 
   @Test
-  void should_create_table_named_exactly_like_topic() {
+  void should_quote_table_name_when_topic_needs_it() {
     assertImplicitCreate("orders-v1.raw", "shop.\"orders-v1.raw\"");
   }
 
   @Test
-  void should_create_case_sensitive_table_named_like_topic() {
-    assertImplicitCreate("Orders", "shop.\"Orders\"");
+  void should_lower_case_table_named_like_topic() {
+    assertImplicitCreate("Orders", "shop.orders");
+  }
+
+  @Test
+  void should_be_fatal_when_created_table_is_not_visible() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.empty());
+    TableConfig tableConfig = implicitPending("orders");
+
+    assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, valueSchema)))
+        .isInstanceOf(FatalSchemaException.class)
+        .hasMessage("Table shop.orders is not visible after creation");
+    verify(session, never()).prepareAsync(anyString());
   }
 
   @Test
@@ -863,8 +875,8 @@ class DdlSchemaReconcilerTest {
   }
 
   @Test
-  void should_bind_field_to_existing_column_ignoring_case() {
-    evolvingTable("userId");
+  void should_bind_field_to_existing_lower_case_column() {
+    evolvingTable("userid");
     existingColumn("userid");
     TableConfig tableConfig = implicitPending("orders");
 
@@ -878,9 +890,42 @@ class DdlSchemaReconcilerTest {
   }
 
   @Test
+  void should_bind_field_to_case_sensitive_column_ignoring_case() {
+    evolvingTable("userid");
+    existingColumn("UserId");
+    TableConfig tableConfig = implicitPending("orders");
+
+    reconciler()
+        .mapperFor(
+            tableConfig,
+            record(keySchema, valueWith("userId", prim(AbstractSchema.Type.STRING, null))));
+
+    verify(session, never()).execute(any(Statement.class));
+    verify(session)
+        .prepareAsync(startsWith("INSERT INTO shop.orders(id,name,ts,\"UserId\") VALUES"));
+  }
+
+  @Test
+  void should_add_lower_case_column_for_new_field() {
+    evolvingTable("emailaddr");
+    TableConfig tableConfig = implicitPending("orders");
+
+    reconciler()
+        .mapperFor(
+            tableConfig,
+            record(keySchema, valueWith("emailAddr", prim(AbstractSchema.Type.STRING, null))));
+
+    ArgumentCaptor<Statement> stmt = ArgumentCaptor.forClass(Statement.class);
+    verify(session).execute(stmt.capture());
+    assertThat(alterQuery(stmt.getValue())).isEqualTo("ALTER TABLE shop.orders ADD emailaddr text");
+    verify(session)
+        .prepareAsync(startsWith("INSERT INTO shop.orders(id,name,ts,emailaddr) VALUES"));
+  }
+
+  @Test
   void should_reject_field_matching_several_columns_ignoring_case() {
-    evolvingTable("userId");
-    existingColumn("userid");
+    evolvingTable("userid");
+    existingColumn("UserId");
     existingColumn("USERID");
     TableConfig tableConfig = implicitPending("orders");
 
@@ -893,7 +938,8 @@ class DdlSchemaReconcilerTest {
                             keySchema,
                             valueWith("userId", prim(AbstractSchema.Type.STRING, null)))))
         .isInstanceOf(ConfigException.class)
-        .hasMessageContaining("userid, \"USERID\"");
+        .hasMessageContaining("Field userId")
+        .hasMessageContaining("\"UserId\", \"USERID\"");
     verify(session, never()).execute(any(Statement.class));
   }
 

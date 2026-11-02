@@ -251,7 +251,8 @@ public class CassandraSinkConfig {
               ConfigDef.ValidString.in(MappingMode.EXPLICIT.name(), MappingMode.IMPLICIT.name()),
               ConfigDef.Importance.LOW,
               "EXPLICIT uses the mapping setting of each topic; "
-                  + "IMPLICIT maps record fields to same-named columns of a table named after the topic")
+                  + "IMPLICIT maps record fields to columns of a table named after the topic, "
+                  + "with names lower-cased as in unquoted CQL")
           .define(
               KEYSPACE_OPT,
               ConfigDef.Type.STRING,
@@ -740,9 +741,9 @@ public class CassandraSinkConfig {
         .filter(v -> !v.isEmpty());
   }
 
-  /** The global keyspace, parsed like the keyspace of a topic binding. */
+  /** The global keyspace: lower-cased unless double-quoted, as in CQL. */
   public Optional<CqlIdentifier> getKeyspaceIdentifier() {
-    return getKeyspace().map(TableConfig::parseLoosely);
+    return getKeyspace().map(TableConfig::parseCql);
   }
 
   /** Builds the implicit binding for a topic first seen at runtime. */

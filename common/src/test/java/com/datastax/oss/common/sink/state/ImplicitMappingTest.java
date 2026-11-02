@@ -42,24 +42,34 @@ class ImplicitMappingTest {
   }
 
   @Test
-  void should_map_value_and_key_fields_by_name() {
+  void should_map_fields_to_lower_case_columns() {
     Map<CqlIdentifier, CqlIdentifier> mapping =
-        ImplicitMapping.forSchemas(struct("id", LONG), struct("name", TEXT, "Email", TEXT));
+        ImplicitMapping.forSchemas(struct("Id", LONG), struct("name", TEXT, "emailAddr", TEXT));
 
     assertThat(mapping)
         .containsExactly(
-            entry(id("id"), id("key.id")),
+            entry(id("id"), id("key.Id")),
             entry(id("name"), id("value.name")),
-            entry(id("Email"), id("value.Email")));
+            entry(id("emailaddr"), id("value.emailAddr")));
   }
 
   @Test
   void should_source_overlapping_field_from_key() {
     Map<CqlIdentifier, CqlIdentifier> mapping =
-        ImplicitMapping.forSchemas(struct("id", LONG), struct("id", LONG, "name", TEXT));
+        ImplicitMapping.forSchemas(struct("id", LONG), struct("ID", LONG, "name", TEXT));
 
     assertThat(mapping)
         .containsExactly(entry(id("id"), id("key.id")), entry(id("name"), id("value.name")));
+  }
+
+  @Test
+  void should_reject_fields_differing_only_in_case() {
+    assertThatThrownBy(
+            () ->
+                ImplicitMapping.forSchemas(
+                    struct("id", LONG), struct("userid", TEXT, "userId", TEXT)))
+        .isInstanceOf(ConfigException.class)
+        .hasMessage("Fields userid and userId both map to column userid");
   }
 
   @Test
@@ -83,36 +93,24 @@ class ImplicitMappingTest {
   }
 
   @Test
-  void should_keep_exact_column_names() {
+  void should_prefer_same_named_column() {
     Map<CqlIdentifier, CqlIdentifier> mapping =
         ImplicitMapping.forSchemas(struct("id", LONG), struct("Email", TEXT));
 
     assertThat(ImplicitMapping.resolveColumns(mapping, table("id", "Email", "email"), "shop.t"))
-        .containsExactly(entry(id("id"), id("key.id")), entry(id("Email"), id("value.Email")));
+        .containsExactly(entry(id("id"), id("key.id")), entry(id("email"), id("value.Email")));
   }
 
   @Test
   void should_resolve_unique_case_insensitive_match() {
     Map<CqlIdentifier, CqlIdentifier> mapping =
-        ImplicitMapping.forSchemas(struct("Id", LONG), struct("userId", TEXT, "other", TEXT));
+        ImplicitMapping.forSchemas(struct("id", LONG), struct("userId", TEXT, "other", TEXT));
 
-    assertThat(ImplicitMapping.resolveColumns(mapping, table("id", "userid"), "shop.t"))
-        .containsExactly(
-            entry(id("id"), id("key.Id")),
-            entry(id("userid"), id("value.userId")),
-            entry(id("other"), id("value.other")));
-  }
-
-  @Test
-  void should_leave_field_missing_when_its_match_is_already_mapped() {
-    Map<CqlIdentifier, CqlIdentifier> mapping =
-        ImplicitMapping.forSchemas(struct("id", LONG), struct("userid", TEXT, "userId", TEXT));
-
-    assertThat(ImplicitMapping.resolveColumns(mapping, table("id", "userid"), "shop.t"))
+    assertThat(ImplicitMapping.resolveColumns(mapping, table("id", "UserId"), "shop.t"))
         .containsExactly(
             entry(id("id"), id("key.id")),
-            entry(id("userid"), id("value.userid")),
-            entry(id("userId"), id("value.userId")));
+            entry(id("UserId"), id("value.userId")),
+            entry(id("other"), id("value.other")));
   }
 
   @Test
@@ -122,10 +120,10 @@ class ImplicitMappingTest {
 
     assertThatThrownBy(
             () ->
-                ImplicitMapping.resolveColumns(mapping, table("id", "userid", "USERID"), "shop.t"))
+                ImplicitMapping.resolveColumns(mapping, table("id", "UserId", "USERID"), "shop.t"))
         .isInstanceOf(ConfigException.class)
-        .hasMessageContaining("userId")
+        .hasMessageContaining("Field userId")
         .hasMessageContaining("shop.t")
-        .hasMessageContaining("userid, \"USERID\"");
+        .hasMessageContaining("\"UserId\", \"USERID\"");
   }
 }

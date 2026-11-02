@@ -146,7 +146,7 @@ public class DdlSchemaReconciler {
     return LifeCycleManager.findTableMetadata(session, tableConfig)
         .orElseThrow(
             () ->
-                new IllegalStateException(
+                new FatalSchemaException(
                     String.format(
                         "Table %s is not visible after creation",
                         tableConfig.getKeyspaceAndTable())));
@@ -272,7 +272,7 @@ public class DdlSchemaReconciler {
     return LifeCycleManager.findTableMetadata(session, tableConfig)
         .orElseThrow(
             () ->
-                new IllegalStateException(
+                new FatalSchemaException(
                     String.format(
                         "Table %s is no longer visible", tableConfig.getKeyspaceAndTable())));
   }
