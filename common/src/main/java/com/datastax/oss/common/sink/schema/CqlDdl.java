@@ -42,10 +42,10 @@ public final class CqlDdl {
             .append(qualified(keyspace, table))
             .append(" (");
     for (Map.Entry<CqlIdentifier, DataType> column : partitionKey.entrySet()) {
-      appendColumn(cql, column);
+      appendColumn(cql, column.getKey(), CqlTypeMapper.frozen(column.getValue()));
     }
     for (Map.Entry<CqlIdentifier, DataType> column : columns.entrySet()) {
-      appendColumn(cql, column);
+      appendColumn(cql, column.getKey(), column.getValue());
     }
     String pk =
         partitionKey.keySet().stream().map(c -> c.asCql(true)).collect(Collectors.joining(","));
@@ -62,11 +62,8 @@ public final class CqlDdl {
         qualified(keyspace, table), column.asCql(true), type.asCql(true, true));
   }
 
-  private static void appendColumn(StringBuilder cql, Map.Entry<CqlIdentifier, DataType> column) {
-    cql.append(column.getKey().asCql(true))
-        .append(' ')
-        .append(column.getValue().asCql(true, true))
-        .append(',');
+  private static void appendColumn(StringBuilder cql, CqlIdentifier name, DataType type) {
+    cql.append(name.asCql(true)).append(' ').append(type.asCql(true, true)).append(',');
   }
 
   private static String qualified(CqlIdentifier keyspace, CqlIdentifier table) {

@@ -18,6 +18,9 @@ package com.datastax.oss.common.sink.schema;
 import com.datastax.oss.common.sink.AbstractSchema;
 import com.datastax.oss.driver.api.core.type.DataType;
 import com.datastax.oss.driver.api.core.type.DataTypes;
+import com.datastax.oss.driver.api.core.type.ListType;
+import com.datastax.oss.driver.api.core.type.MapType;
+import com.datastax.oss.driver.api.core.type.SetType;
 
 /** Maps Connect schemas to CQL types. */
 public final class CqlTypeMapper {
@@ -65,11 +68,27 @@ public final class CqlTypeMapper {
       case BYTES:
         return DataTypes.BLOB;
       case ARRAY:
-        return DataTypes.listOf(toCql(schema.valueSchema()));
+        return DataTypes.listOf(frozen(toCql(schema.valueSchema())));
       case MAP:
-        return DataTypes.mapOf(toCql(schema.keySchema()), toCql(schema.valueSchema()));
+        return DataTypes.mapOf(
+            frozen(toCql(schema.keySchema())), frozen(toCql(schema.valueSchema())));
       default:
         throw new SchemaMismatchException("Unsupported schema type " + schema.type());
     }
+  }
+
+  /** Collections nested in collections or used as key columns must be frozen. */
+  public static DataType frozen(DataType type) {
+    if (type instanceof ListType) {
+      return DataTypes.frozenListOf(((ListType) type).getElementType());
+    }
+    if (type instanceof SetType) {
+      return DataTypes.frozenSetOf(((SetType) type).getElementType());
+    }
+    if (type instanceof MapType) {
+      MapType map = (MapType) type;
+      return DataTypes.frozenMapOf(map.getKeyType(), map.getValueType());
+    }
+    return type;
   }
 }

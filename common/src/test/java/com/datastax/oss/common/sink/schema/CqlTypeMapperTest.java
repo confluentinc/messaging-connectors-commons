@@ -57,16 +57,21 @@ class CqlTypeMapperTest {
         Arguments.of(prim(STRING, "some.other.Name"), DataTypes.TEXT),
         Arguments.of(array(prim(STRING, null)), DataTypes.listOf(DataTypes.TEXT)),
         Arguments.of(
-            array(array(prim(INT32, DATE))), DataTypes.listOf(DataTypes.listOf(DataTypes.DATE))),
+            array(array(prim(INT32, DATE))),
+            DataTypes.listOf(DataTypes.frozenListOf(DataTypes.DATE))),
         Arguments.of(
             map(prim(STRING, null), array(prim(INT32, null))),
-            DataTypes.mapOf(DataTypes.TEXT, DataTypes.listOf(DataTypes.INT))));
+            DataTypes.mapOf(DataTypes.TEXT, DataTypes.frozenListOf(DataTypes.INT))),
+        Arguments.of(
+            array(map(prim(STRING, null), array(prim(INT32, null)))),
+            DataTypes.listOf(
+                DataTypes.frozenMapOf(DataTypes.TEXT, DataTypes.frozenListOf(DataTypes.INT)))));
   }
 
   @ParameterizedTest
   @MethodSource("mappings")
   void should_map_connect_type_to_cql(AbstractSchema schema, DataType expected) {
-    assertThat(CqlTypeMapper.toCql(schema)).isEqualTo(expected);
+    assertThat(CqlTypeMapper.toCql(schema).asCql(true, true)).isEqualTo(expected.asCql(true, true));
   }
 
   @Test

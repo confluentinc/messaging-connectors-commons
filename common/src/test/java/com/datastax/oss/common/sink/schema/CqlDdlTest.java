@@ -58,6 +58,21 @@ class CqlDdlTest {
   }
 
   @Test
+  void should_freeze_collection_partition_key_columns() {
+    LinkedHashMap<CqlIdentifier, DataType> pk = new LinkedHashMap<>();
+    pk.put(id("ids"), DataTypes.listOf(DataTypes.INT));
+    pk.put(id("attrs"), DataTypes.mapOf(DataTypes.TEXT, DataTypes.frozenListOf(DataTypes.INT)));
+    LinkedHashMap<CqlIdentifier, DataType> cols = new LinkedHashMap<>();
+    cols.put(id("tags"), DataTypes.listOf(DataTypes.frozenListOf(DataTypes.TEXT)));
+
+    assertThat(CqlDdl.createTable(SHOP, ORDERS, pk, cols))
+        .isEqualTo(
+            "CREATE TABLE IF NOT EXISTS shop.orders (ids frozen<list<int>>,"
+                + "attrs frozen<map<text, frozen<list<int>>>>,tags list<frozen<list<text>>>,"
+                + "PRIMARY KEY((ids,attrs)))");
+  }
+
+  @Test
   void should_render_add_column() {
     assertThat(
             CqlDdl.addColumn(
