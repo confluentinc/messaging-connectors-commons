@@ -43,8 +43,6 @@ import com.datastax.oss.common.sink.config.MappingMode;
 import com.datastax.oss.common.sink.config.SslConfig;
 import com.datastax.oss.common.sink.config.TableConfig;
 import com.datastax.oss.common.sink.config.TopicConfig;
-import com.datastax.oss.common.sink.schema.AstraBundle;
-import com.datastax.oss.common.sink.schema.AstraDevOpsClient;
 import com.datastax.oss.common.sink.schema.AstraKeyspaceCreator;
 import com.datastax.oss.common.sink.schema.CqlKeyspaceCreator;
 import com.datastax.oss.common.sink.schema.KeyspaceCreator;
@@ -460,13 +458,10 @@ public class LifeCycleManager {
       return null;
     }
     if (config.isCloud()) {
-      String bundle = config.getJavaDriverSettings().get(SECURE_CONNECT_BUNDLE_DRIVER_SETTING);
       return new AstraKeyspaceCreator(
-          new AstraDevOpsClient(
-              AstraDevOpsClient.DEFAULT_BASE_URL,
-              config.getAuthenticatorConfig().getPassword(),
-              ASTRA_API_TIMEOUT_MILLIS),
-          AstraBundle.databaseId(bundle));
+          config.getJavaDriverSettings().get(SECURE_CONNECT_BUNDLE_DRIVER_SETTING),
+          config.getAuthenticatorConfig().getPassword(),
+          ASTRA_API_TIMEOUT_MILLIS);
     }
     return new CqlKeyspaceCreator(config.getKeyspaceReplicationFactor());
   }
