@@ -33,7 +33,6 @@ import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.common.sink.config.CassandraSinkConfig;
 import com.datastax.oss.common.sink.config.TableConfig;
 import com.datastax.oss.common.sink.config.TableConfigBuilder;
-import com.datastax.oss.common.sink.schema.CqlKeyspaceCreator;
 import com.datastax.oss.common.sink.schema.KeyspaceCreator;
 import com.datastax.oss.common.sink.util.SinkUtil;
 import com.datastax.oss.driver.api.core.CqlIdentifier;
@@ -367,7 +366,7 @@ class LifeCycleManagerTest {
     props.put("createKeyspace", "true");
 
     assertThat(LifeCycleManager.keyspaceCreatorFor(new CassandraSinkConfig(props)))
-        .isInstanceOf(CqlKeyspaceCreator.class);
+        .isInstanceOf(KeyspaceCreator.Cql.class);
   }
 
   @Test

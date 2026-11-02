@@ -17,8 +17,44 @@ package com.datastax.oss.common.sink.schema;
 
 import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.cql.SimpleStatement;
+import com.datastax.oss.driver.api.core.servererrors.UnauthorizedException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Creates a keyspace if it does not exist. */
 public interface KeyspaceCreator {
   void ensureKeyspace(CqlSession session, CqlIdentifier keyspace);
+
+  /** Creates keyspaces with CQL, using SimpleStrategy. */
+  class Cql implements KeyspaceCreator {
+    private static final Logger log = LoggerFactory.getLogger(Cql.class);
+
+    private final int replicationFactor;
+
+    public Cql(int replicationFactor) {
+      this.replicationFactor = replicationFactor;
+    }
+
+    @Override
+    public void ensureKeyspace(CqlSession session, CqlIdentifier keyspace) {
+      if (session.getMetadata().getKeyspace(keyspace).isPresent()) {
+        return;
+      }
+      String cql = CqlDdl.createKeyspace(keyspace, replicationFactor);
+      try {
+        session.execute(SimpleStatement.newInstance(cql));
+      } catch (UnauthorizedException e) {
+        throw new FatalSchemaException(
+            String.format(
+                "Not authorized to run %s; grant CREATE on ALL KEYSPACES or create keyspace %s manually",
+                cql, keyspace.asInternal()),
+            e);
+      }
+      if (!session.checkSchemaAgreement()) {
+        log.warn("Schema agreement not reached after creating keyspace {}", keyspace.asInternal());
+      }
+      session.refreshSchema();
+    }
+  }
 }

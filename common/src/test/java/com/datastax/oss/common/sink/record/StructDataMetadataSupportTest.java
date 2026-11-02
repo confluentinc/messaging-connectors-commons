@@ -19,7 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.datastax.oss.common.sink.AbstractField;
 import com.datastax.oss.common.sink.AbstractSchema;
-import com.datastax.oss.common.sink.schema.CqlTypeMapper;
+import com.datastax.oss.common.sink.schema.CqlDdl;
 import com.datastax.oss.driver.api.core.type.DataType;
 import com.datastax.oss.driver.api.core.type.DataTypes;
 import com.datastax.oss.driver.api.core.type.reflect.GenericType;
@@ -90,14 +90,11 @@ class StructDataMetadataSupportTest {
   void should_map_logical_types_to_their_java_values() {
     assertThat(
             StructDataMetadataSupport.getGenericType(
-                schema(AbstractSchema.Type.BYTES, CqlTypeMapper.DECIMAL)))
+                schema(AbstractSchema.Type.BYTES, CqlDdl.DECIMAL)))
         .isEqualTo(GenericType.of(BigDecimal.class));
-    for (String name :
-        new String[] {CqlTypeMapper.DATE, CqlTypeMapper.TIME, CqlTypeMapper.TIMESTAMP}) {
+    for (String name : new String[] {CqlDdl.DATE, CqlDdl.TIME, CqlDdl.TIMESTAMP}) {
       AbstractSchema.Type physical =
-          name.equals(CqlTypeMapper.TIMESTAMP)
-              ? AbstractSchema.Type.INT64
-              : AbstractSchema.Type.INT32;
+          name.equals(CqlDdl.TIMESTAMP) ? AbstractSchema.Type.INT64 : AbstractSchema.Type.INT32;
       assertThat(StructDataMetadataSupport.getGenericType(schema(physical, name)))
           .isEqualTo(GenericType.of(Date.class));
     }

@@ -44,7 +44,6 @@ import com.datastax.oss.common.sink.config.SslConfig;
 import com.datastax.oss.common.sink.config.TableConfig;
 import com.datastax.oss.common.sink.config.TopicConfig;
 import com.datastax.oss.common.sink.schema.AstraKeyspaceCreator;
-import com.datastax.oss.common.sink.schema.CqlKeyspaceCreator;
 import com.datastax.oss.common.sink.schema.KeyspaceCreator;
 import com.datastax.oss.common.sink.ssl.SessionBuilder;
 import com.datastax.oss.common.sink.util.SinkUtil;
@@ -463,7 +462,7 @@ public class LifeCycleManager {
           config.getAuthenticatorConfig().getPassword(),
           ASTRA_API_TIMEOUT_MILLIS);
     }
-    return new CqlKeyspaceCreator(config.getKeyspaceReplicationFactor());
+    return new KeyspaceCreator.Cql(config.getKeyspaceReplicationFactor());
   }
 
   @VisibleForTesting

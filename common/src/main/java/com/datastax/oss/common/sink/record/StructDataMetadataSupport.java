@@ -17,7 +17,7 @@ package com.datastax.oss.common.sink.record;
 
 import com.datastax.oss.common.sink.AbstractSchema;
 import com.datastax.oss.common.sink.AbstractStruct;
-import com.datastax.oss.common.sink.schema.CqlTypeMapper;
+import com.datastax.oss.common.sink.schema.CqlDdl;
 import com.datastax.oss.driver.api.core.type.reflect.GenericType;
 import com.datastax.oss.driver.shaded.guava.common.collect.ImmutableMap;
 import edu.umd.cs.findbugs.annotations.NonNull;
@@ -44,11 +44,11 @@ public class StructDataMetadataSupport {
     String logicalName = fieldType.name();
     if (logicalName != null) {
       switch (logicalName) {
-        case CqlTypeMapper.DECIMAL:
+        case CqlDdl.DECIMAL:
           return GenericType.of(BigDecimal.class);
-        case CqlTypeMapper.DATE:
-        case CqlTypeMapper.TIME:
-        case CqlTypeMapper.TIMESTAMP:
+        case CqlDdl.DATE:
+        case CqlDdl.TIME:
+        case CqlDdl.TIMESTAMP:
           return GenericType.of(Date.class);
         default:
           break;

@@ -43,7 +43,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
 @ExtendWith(LogInterceptingExtension.class)
-class CqlKeyspaceCreatorTest {
+class KeyspaceCreatorTest {
   private static final CqlIdentifier SHOP = CqlIdentifier.fromInternal("shop");
 
   private CqlSession session;
@@ -60,7 +60,7 @@ class CqlKeyspaceCreatorTest {
   void should_create_with_simple_strategy_when_missing() {
     when(metadata.getKeyspace(SHOP)).thenReturn(Optional.empty());
 
-    new CqlKeyspaceCreator(2).ensureKeyspace(session, SHOP);
+    new KeyspaceCreator.Cql(2).ensureKeyspace(session, SHOP);
 
     ArgumentCaptor<SimpleStatement> stmt = ArgumentCaptor.forClass(SimpleStatement.class);
     InOrder order = inOrder(session);
@@ -76,7 +76,7 @@ class CqlKeyspaceCreatorTest {
   void should_do_nothing_when_present() {
     when(metadata.getKeyspace(SHOP)).thenReturn(Optional.of(mock(KeyspaceMetadata.class)));
 
-    new CqlKeyspaceCreator(2).ensureKeyspace(session, SHOP);
+    new KeyspaceCreator.Cql(2).ensureKeyspace(session, SHOP);
 
     verify(session, never()).execute(any(Statement.class));
   }
@@ -87,7 +87,7 @@ class CqlKeyspaceCreatorTest {
     when(session.execute(any(Statement.class)))
         .thenThrow(new UnauthorizedException(null, "no permission"));
 
-    assertThatThrownBy(() -> new CqlKeyspaceCreator(2).ensureKeyspace(session, SHOP))
+    assertThatThrownBy(() -> new KeyspaceCreator.Cql(2).ensureKeyspace(session, SHOP))
         .isInstanceOf(FatalSchemaException.class)
         .hasMessageContaining("CREATE")
         .hasMessageContaining("shop");
@@ -95,11 +95,11 @@ class CqlKeyspaceCreatorTest {
 
   @Test
   void should_warn_without_schema_agreement(
-      @LogCapture(level = WARN, value = CqlKeyspaceCreator.class) LogInterceptor logs) {
+      @LogCapture(level = WARN, value = KeyspaceCreator.Cql.class) LogInterceptor logs) {
     when(metadata.getKeyspace(SHOP)).thenReturn(Optional.empty());
     when(session.checkSchemaAgreement()).thenReturn(false);
 
-    new CqlKeyspaceCreator(2).ensureKeyspace(session, SHOP);
+    new KeyspaceCreator.Cql(2).ensureKeyspace(session, SHOP);
 
     assertThat(logs.getLoggedMessages())
         .contains("Schema agreement not reached after creating keyspace shop");

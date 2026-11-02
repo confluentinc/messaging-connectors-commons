@@ -24,7 +24,6 @@ import com.datastax.oss.common.sink.config.CassandraSinkConfig;
 import com.datastax.oss.common.sink.config.TableConfig;
 import com.datastax.oss.common.sink.record.RawData;
 import com.datastax.oss.common.sink.schema.CqlDdl;
-import com.datastax.oss.common.sink.schema.CqlTypeMapper;
 import com.datastax.oss.common.sink.schema.FatalSchemaException;
 import com.datastax.oss.common.sink.util.SinkUtil;
 import com.datastax.oss.driver.api.core.CqlIdentifier;
@@ -438,7 +437,7 @@ public class DdlSchemaReconciler {
     }
     String field = source.substring(part.length() + 1);
     if (field.equals(RawData.FIELD_NAME)) {
-      return CqlTypeMapper.toCql(schema);
+      return CqlDdl.toCql(schema);
     }
     AbstractField fieldSchema =
         schema.type() == AbstractSchema.Type.STRUCT ? schema.field(field) : null;
@@ -446,7 +445,7 @@ public class DdlSchemaReconciler {
       throw new ConfigException(
           String.format("Field %s is not defined in the record %s schema", field, part));
     }
-    return CqlTypeMapper.toCql(fieldSchema.schema());
+    return CqlDdl.toCql(fieldSchema.schema());
   }
 
   /** Immutable, insertion-ordered mappers of the most recent schema versions. */
