@@ -276,14 +276,16 @@ class AstraKeyspaceCreatorTest {
     }
 
     @Test
-    void should_be_fatal_mentioning_private_link_when_unreachable() {
+    void should_be_fatal_with_cause_and_hint_when_unreachable() {
       int port = server.getAddress().getPort();
       server.stop(0);
       DevOpsClient closed = new DevOpsClient("http://127.0.0.1:" + port, token, 500);
 
       assertThatThrownBy(() -> closed.createKeyspace("db1", "shop"))
           .isInstanceOf(FatalSchemaException.class)
-          .hasMessageContaining("PrivateLink")
+          .hasMessageContaining("Cannot reach the Astra DevOps API")
+          .hasMessageContaining("ConnectException")
+          .hasMessageContaining("network access")
           .satisfies(e -> assertThat(e.getMessage()).doesNotContain(token));
     }
 
@@ -305,7 +307,7 @@ class AstraKeyspaceCreatorTest {
       assertThatThrownBy(() -> client().getDatabaseStatus("db1"))
           .isInstanceOf(FatalSchemaException.class)
           .hasMessageContaining("unexpected response from the Astra DevOps API")
-          .satisfies(e -> assertThat(e.getMessage()).doesNotContain("PrivateLink"));
+          .satisfies(e -> assertThat(e.getMessage()).doesNotContain("Cannot reach"));
     }
   }
 }

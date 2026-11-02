@@ -249,8 +249,8 @@ public class AstraKeyspaceCreator implements KeyspaceCreator {
     private FatalSchemaException unreachable(String action, IOException cause) {
       return new FatalSchemaException(
           String.format(
-              "Cannot reach the Astra DevOps API at %s to %s; with private networking (PrivateLink) the connector must be able to reach it, or create the keyspace manually",
-              baseUrl, action),
+              "Cannot reach the Astra DevOps API at %s to %s (%s: %s); make sure the connector has network access to it, or create the keyspace manually",
+              baseUrl, action, cause.getClass().getSimpleName(), cause.getMessage()),
           cause);
     }
   }
