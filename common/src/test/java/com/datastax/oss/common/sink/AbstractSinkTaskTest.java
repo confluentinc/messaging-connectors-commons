@@ -17,13 +17,14 @@ package com.datastax.oss.common.sink;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.datastax.oss.common.sink.config.TableConfig;
 import com.datastax.oss.common.sink.config.TopicConfig;
 import com.datastax.oss.common.sink.schema.FatalSchemaException;
-import com.datastax.oss.common.sink.schema.SchemaMismatchException;
+import com.datastax.oss.common.sink.state.DdlSchemaReconciler;
 import com.datastax.oss.common.sink.state.InstanceState;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -77,14 +78,15 @@ class AbstractSinkTaskTest {
     return new SinkRecordImpl("mytopic", 0, null, "key", null, "value", 1L);
   }
 
+  private void reconcilerThrows(RuntimeException e) {
+    DdlSchemaReconciler reconciler = mock(DdlSchemaReconciler.class);
+    when(reconciler.mapperFor(any(), any())).thenThrow(e);
+    when(instanceState.getSchemaReconciler()).thenReturn(Optional.of(reconciler));
+  }
+
   @Test
   void mapAndQueueRecord_rethrows_fatal_schema_exception_even_when_ignore_errors_all() {
-    when(instanceState.getSchemaReconciler())
-        .thenReturn(
-            Optional.of(
-                (tableConfig, record) -> {
-                  throw new FatalSchemaException("Not authorized");
-                }));
+    reconcilerThrows(new FatalSchemaException("Not authorized"));
 
     assertThatThrownBy(() -> task.put(Collections.singletonList(record())))
         .hasRootCauseInstanceOf(FatalSchemaException.class);
@@ -93,16 +95,11 @@ class AbstractSinkTaskTest {
 
   @Test
   void schema_mismatch_goes_to_failure_handling() {
-    when(instanceState.getSchemaReconciler())
-        .thenReturn(
-            Optional.of(
-                (tableConfig, record) -> {
-                  throw new SchemaMismatchException("bad shape");
-                }));
+    reconcilerThrows(new ConfigException("bad shape"));
 
     task.put(Collections.singletonList(record()));
 
     assertThat(failures).hasSize(1);
-    assertThat(failures.get(0)).isInstanceOf(SchemaMismatchException.class);
+    assertThat(failures.get(0)).isInstanceOf(ConfigException.class);
   }
 }

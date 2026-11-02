@@ -16,6 +16,7 @@
 package com.datastax.oss.common.sink.schema;
 
 import com.datastax.oss.common.sink.AbstractSchema;
+import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.driver.api.core.type.DataType;
 import com.datastax.oss.driver.api.core.type.DataTypes;
 import com.datastax.oss.driver.api.core.type.ListType;
@@ -73,7 +74,7 @@ public final class CqlTypeMapper {
         return DataTypes.mapOf(
             frozen(toCql(schema.keySchema())), frozen(toCql(schema.valueSchema())));
       default:
-        throw new SchemaMismatchException("Unsupported schema type " + schema.type());
+        throw new ConfigException("Unsupported schema type " + schema.type());
     }
   }
 

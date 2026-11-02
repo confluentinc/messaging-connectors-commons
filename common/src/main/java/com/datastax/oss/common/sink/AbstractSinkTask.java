@@ -24,9 +24,9 @@ import com.datastax.oss.common.sink.record.KeyValueRecord;
 import com.datastax.oss.common.sink.record.KeyValueRecordMetadata;
 import com.datastax.oss.common.sink.record.RecordAndStatement;
 import com.datastax.oss.common.sink.schema.FatalSchemaException;
+import com.datastax.oss.common.sink.state.DdlSchemaReconciler;
 import com.datastax.oss.common.sink.state.InstanceState;
 import com.datastax.oss.common.sink.state.LifeCycleManager;
-import com.datastax.oss.common.sink.state.SchemaReconciler;
 import com.datastax.oss.driver.api.core.cql.AsyncResultSet;
 import com.datastax.oss.driver.api.core.cql.BoundStatement;
 import com.datastax.oss.driver.shaded.guava.common.annotations.VisibleForTesting;
@@ -205,7 +205,7 @@ public abstract class AbstractSinkTask {
           KeyValueRecord keyValueRecord =
               new KeyValueRecord(
                   key.getInnerData(), value.getInnerData(), record.timestamp(), headers);
-          Optional<SchemaReconciler> reconciler = instanceState.getSchemaReconciler();
+          Optional<DdlSchemaReconciler> reconciler = instanceState.getSchemaReconciler();
           RecordMapper mapper =
               reconciler.isPresent()
                   ? reconciler.get().mapperFor(tableConfig, record)

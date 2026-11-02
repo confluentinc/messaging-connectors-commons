@@ -64,7 +64,7 @@ public class InstanceState {
   private final Executor mappingExecutor;
   private final JmxReporter reporter;
   private final GlobalSinkMetrics globalSinkMetrics;
-  private final Optional<SchemaReconciler> schemaReconciler;
+  private final Optional<DdlSchemaReconciler> schemaReconciler;
   private final boolean implicitMapping;
 
   public InstanceState(
@@ -250,7 +250,7 @@ public class InstanceState {
 
   /** Empty when no table reconciliation is configured; records then use the prepared mapper. */
   @NonNull
-  public Optional<SchemaReconciler> getSchemaReconciler() {
+  public Optional<DdlSchemaReconciler> getSchemaReconciler() {
     return schemaReconciler;
   }
 

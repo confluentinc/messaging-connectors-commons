@@ -18,6 +18,7 @@ package com.datastax.oss.common.sink.state;
 import com.datastax.oss.common.sink.AbstractField;
 import com.datastax.oss.common.sink.AbstractSchema;
 import com.datastax.oss.common.sink.AbstractSinkRecord;
+import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.common.sink.RecordMapper;
 import com.datastax.oss.common.sink.config.CassandraSinkConfig;
 import com.datastax.oss.common.sink.config.TableConfig;
@@ -25,7 +26,6 @@ import com.datastax.oss.common.sink.record.RawData;
 import com.datastax.oss.common.sink.schema.CqlDdl;
 import com.datastax.oss.common.sink.schema.CqlTypeMapper;
 import com.datastax.oss.common.sink.schema.FatalSchemaException;
-import com.datastax.oss.common.sink.schema.SchemaMismatchException;
 import com.datastax.oss.common.sink.util.SinkUtil;
 import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.CqlSession;
@@ -50,7 +50,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** Creates missing tables and adds missing columns from the record schema. */
-public class DdlSchemaReconciler implements SchemaReconciler {
+public class DdlSchemaReconciler {
   private static final Logger log = LoggerFactory.getLogger(DdlSchemaReconciler.class);
   private static final String KEY = "key";
   private static final String VALUE = "value";
@@ -69,13 +69,13 @@ public class DdlSchemaReconciler implements SchemaReconciler {
     this.state = state;
   }
 
-  @Override
+  /** Returns the mapper for the record, reconciling the table schema first. */
   public RecordMapper mapperFor(TableConfig tableConfig, AbstractSinkRecord record) {
     if (record.value() == null) {
       // A tombstone carries no value schema; deletes only need the prepared mapper.
       RecordMapper existing = state.getRecordMapper(tableConfig);
       if (existing == null) {
-        throw new SchemaMismatchException(
+        throw new ConfigException(
             String.format(
                 "Tombstone: cannot apply a delete to %s before its first non-null record",
                 tableConfig.getKeyspaceAndTable()));
@@ -125,7 +125,7 @@ public class DdlSchemaReconciler implements SchemaReconciler {
     AbstractSchema keySchema = record.keySchema();
     AbstractSchema valueSchema = record.valueSchema();
     if (valueSchema == null || valueSchema.type() != AbstractSchema.Type.STRUCT) {
-      throw new SchemaMismatchException(
+      throw new ConfigException(
           String.format(
               "Implicit mapping to %s needs a struct record value schema",
               tableConfig.getKeyspaceAndTable()));
@@ -180,7 +180,7 @@ public class DdlSchemaReconciler implements SchemaReconciler {
       AbstractSchema valueSchema,
       Map<CqlIdentifier, CqlIdentifier> mapping) {
     if (keySchema == null || keySchema.type() != AbstractSchema.Type.STRUCT) {
-      throw new SchemaMismatchException(
+      throw new ConfigException(
           String.format(
               "Cannot create table %s: implicit table creation needs a struct record key",
               tableConfig.getKeyspaceAndTable()));
@@ -197,7 +197,7 @@ public class DdlSchemaReconciler implements SchemaReconciler {
       }
     }
     if (partitionKey.isEmpty()) {
-      throw new SchemaMismatchException(
+      throw new ConfigException(
           String.format(
               "Cannot create table %s: the record key has no fields to form the primary key",
               tableConfig.getKeyspaceAndTable()));
@@ -222,7 +222,7 @@ public class DdlSchemaReconciler implements SchemaReconciler {
             .map(e -> e.getKey().asCql(true))
             .collect(Collectors.joining(", "));
     if (!missingKeyColumns.isEmpty()) {
-      throw new SchemaMismatchException(
+      throw new ConfigException(
           String.format(
               "The primary key of table %s does not match the record key fields; missing key columns: %s",
               tableConfig.getKeyspaceAndTable(), missingKeyColumns));
@@ -236,7 +236,7 @@ public class DdlSchemaReconciler implements SchemaReconciler {
               .stream()
               .map(e -> addColumnCql(tableConfig, e.getKey(), e.getValue()))
               .collect(Collectors.joining("; "));
-      throw new SchemaMismatchException(
+      throw new ConfigException(
           String.format(
               "Table %s has no column for some record fields; add them with: %s",
               tableConfig.getKeyspaceAndTable(), alters));
@@ -329,7 +329,7 @@ public class DdlSchemaReconciler implements SchemaReconciler {
       }
     }
     if (partitionKey.isEmpty()) {
-      throw new SchemaMismatchException(noKeyColumn(tableConfig));
+      throw new ConfigException(noKeyColumn(tableConfig));
     }
     createTable(tableConfig, partitionKey, columns);
   }
@@ -376,7 +376,7 @@ public class DdlSchemaReconciler implements SchemaReconciler {
     if (source.equals(NOW_FUNCTION)) {
       return DataTypes.TIMEUUID;
     }
-    throw new SchemaMismatchException(underivable(tableConfig, source));
+    throw new ConfigException(underivable(tableConfig, source));
   }
 
   private void createTable(
@@ -387,7 +387,7 @@ public class DdlSchemaReconciler implements SchemaReconciler {
         CqlDdl.createTable(
             tableConfig.getKeyspace(), tableConfig.getTable(), partitionKey, columns);
     if (!config.isCreateTable()) {
-      throw new SchemaMismatchException(
+      throw new ConfigException(
           String.format(
               "Table %s does not exist; create it with: %s",
               tableConfig.getKeyspaceAndTable(), cql));
@@ -431,7 +431,7 @@ public class DdlSchemaReconciler implements SchemaReconciler {
 
   private static DataType fieldType(AbstractSchema schema, String part, String source) {
     if (schema == null) {
-      throw new SchemaMismatchException(
+      throw new ConfigException(
           String.format(
               "Deriving a column type needs a structured schema on the record %s (mapped from %s)",
               part, source));
@@ -443,7 +443,7 @@ public class DdlSchemaReconciler implements SchemaReconciler {
     AbstractField fieldSchema =
         schema.type() == AbstractSchema.Type.STRUCT ? schema.field(field) : null;
     if (fieldSchema == null) {
-      throw new SchemaMismatchException(
+      throw new ConfigException(
           String.format("Field %s is not defined in the record %s schema", field, part));
     }
     return CqlTypeMapper.toCql(fieldSchema.schema());

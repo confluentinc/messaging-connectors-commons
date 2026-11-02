@@ -24,7 +24,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.datastax.oss.common.sink.AbstractSchema;
-import com.datastax.oss.common.sink.schema.SchemaMismatchException;
+import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.metadata.schema.ColumnMetadata;
 import com.datastax.oss.driver.api.core.metadata.schema.TableMetadata;
@@ -123,7 +123,7 @@ class ImplicitMappingTest {
     assertThatThrownBy(
             () ->
                 ImplicitMapping.resolveColumns(mapping, table("id", "userid", "USERID"), "shop.t"))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("userId")
         .hasMessageContaining("shop.t")
         .hasMessageContaining("userid, \"USERID\"");

@@ -35,12 +35,12 @@ import static org.slf4j.event.Level.WARN;
 import com.codahale.metrics.MetricRegistry;
 import com.datastax.oss.common.sink.AbstractSchema;
 import com.datastax.oss.common.sink.AbstractSinkRecord;
+import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.common.sink.RecordMapper;
 import com.datastax.oss.common.sink.config.CassandraSinkConfig;
 import com.datastax.oss.common.sink.config.TableConfig;
 import com.datastax.oss.common.sink.config.TableConfigBuilder;
 import com.datastax.oss.common.sink.schema.FatalSchemaException;
-import com.datastax.oss.common.sink.schema.SchemaMismatchException;
 import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.cql.PreparedStatement;
@@ -251,7 +251,7 @@ class DdlSchemaReconcilerTest {
     TableConfig tableConfig = pending("name=value.name, ts=value.ts");
 
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, valueSchema)))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("primary key");
     verify(session, never()).execute(any(Statement.class));
   }
@@ -261,7 +261,7 @@ class DdlSchemaReconcilerTest {
     TableConfig tableConfig = pending("id=key.id, name=value.name, ts=value.ts");
 
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, null)))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("structured schema");
     verify(session, never()).execute(any(Statement.class));
   }
@@ -271,7 +271,7 @@ class DdlSchemaReconcilerTest {
     TableConfig tableConfig = pending("id=key.id, h=header.h");
 
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, valueSchema)))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("header.h");
   }
 
@@ -297,7 +297,7 @@ class DdlSchemaReconcilerTest {
     TableConfig tableConfig = pending("id=key.id, name=value.name, ts=value.ts");
 
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, valueSchema)))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining(
             "CREATE TABLE IF NOT EXISTS shop.orders (id bigint,name text,ts timestamp,PRIMARY KEY(id))");
     verify(session, never()).execute(any(Statement.class));
@@ -380,7 +380,7 @@ class DdlSchemaReconcilerTest {
                 reconciler()
                     .mapperFor(
                         tableConfig, record(prim(AbstractSchema.Type.INT64, null), valueSchema)))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("implicit table creation needs a struct record key");
     verify(session, never()).execute(any(Statement.class));
   }
@@ -390,7 +390,7 @@ class DdlSchemaReconcilerTest {
     TableConfig tableConfig = implicitPending("orders");
 
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, null)))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("struct record value");
     verify(session, never()).execute(any(Statement.class));
   }
@@ -401,7 +401,7 @@ class DdlSchemaReconcilerTest {
     TableConfig tableConfig = implicitPending("orders");
 
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, valueSchema)))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("Table shop.orders does not exist")
         .hasMessageContaining(
             "CREATE TABLE IF NOT EXISTS shop.orders (id bigint,name text,ts timestamp,PRIMARY KEY(id))");
@@ -432,7 +432,7 @@ class DdlSchemaReconcilerTest {
             prim(AbstractSchema.Type.STRING, null));
 
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, value)))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("ALTER TABLE shop.orders ADD email text");
     verify(session, never()).execute(any(Statement.class));
     verify(session, never()).prepareAsync(anyString());
@@ -470,7 +470,7 @@ class DdlSchemaReconcilerTest {
     TableConfig tableConfig = implicitPending("orders");
 
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, tombstone()))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining(
             "cannot apply a delete to shop.orders before its first non-null record");
     verify(session, never()).execute(any(Statement.class));
@@ -482,7 +482,7 @@ class DdlSchemaReconcilerTest {
     TableConfig tableConfig = pending("id=key.id, name=value.name, ts=value.ts");
 
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, tombstone()))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining(
             "cannot apply a delete to shop.orders before its first non-null record");
     verify(session, never()).execute(any(Statement.class));
@@ -496,7 +496,7 @@ class DdlSchemaReconcilerTest {
     AbstractSchema key = struct("tenant", prim(AbstractSchema.Type.STRING, null));
 
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(key, valueSchema)))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("primary key of table shop.orders does not match the record key")
         .hasMessageContaining("tenant")
         .satisfies(e -> assertThat(e.getMessage()).doesNotContain("ALTER TABLE"));
@@ -718,7 +718,7 @@ class DdlSchemaReconcilerTest {
     AbstractSchema key = struct("tenant", prim(AbstractSchema.Type.STRING, null));
 
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(key, valueSchema)))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("primary key of table shop.orders does not match the record key")
         .satisfies(e -> assertThat(e.getMessage()).doesNotContain("ALTER TABLE"));
     verify(session, never()).execute(any(Statement.class));
@@ -813,7 +813,7 @@ class DdlSchemaReconcilerTest {
     TableConfig tableConfig = implicitPending("orders");
 
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(keySchema, valueSchema)))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("ALTER TABLE shop.orders ADD ts timestamp");
     verify(session, times(1)).execute(any(Statement.class));
     verify(session, never()).prepareAsync(anyString());
@@ -825,7 +825,7 @@ class DdlSchemaReconcilerTest {
     AbstractSchema key = struct("tenant", prim(AbstractSchema.Type.STRING, null));
 
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(key, valueSchema)))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("primary key of table shop.orders does not match the record key")
         .hasMessageContaining("tenant");
     verify(session, times(1)).execute(any(Statement.class));
@@ -892,7 +892,7 @@ class DdlSchemaReconcilerTest {
                         record(
                             keySchema,
                             valueWith("userId", prim(AbstractSchema.Type.STRING, null)))))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("userid, \"USERID\"");
     verify(session, never()).execute(any(Statement.class));
   }

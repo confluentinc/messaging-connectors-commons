@@ -24,6 +24,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.datastax.oss.common.sink.AbstractSchema;
+import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.driver.api.core.type.DataType;
 import com.datastax.oss.driver.api.core.type.DataTypes;
 import java.util.stream.Stream;
@@ -77,21 +78,20 @@ class CqlTypeMapperTest {
   @Test
   void should_reject_struct() {
     assertThatThrownBy(() -> CqlTypeMapper.toCql(struct()))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("STRUCT");
   }
 
   @Test
   void should_reject_nested_struct() {
     assertThatThrownBy(() -> CqlTypeMapper.toCql(array(struct("a", prim(INT32, null)))))
-        .isInstanceOf(SchemaMismatchException.class)
+        .isInstanceOf(ConfigException.class)
         .hasMessageContaining("STRUCT");
   }
 
   @Test
   void exceptions_should_keep_message_and_cause() {
     Throwable cause = new RuntimeException("c");
-    assertThat(new SchemaMismatchException("m", cause)).hasMessage("m").hasCause(cause);
     assertThat(new FatalSchemaException("f", cause)).hasMessage("f").hasCause(cause);
     assertThat(new FatalSchemaException("f")).hasMessage("f");
   }

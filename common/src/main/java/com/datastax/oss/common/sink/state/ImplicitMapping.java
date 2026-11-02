@@ -17,7 +17,7 @@ package com.datastax.oss.common.sink.state;
 
 import com.datastax.oss.common.sink.AbstractField;
 import com.datastax.oss.common.sink.AbstractSchema;
-import com.datastax.oss.common.sink.schema.SchemaMismatchException;
+import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.metadata.schema.TableMetadata;
 import edu.umd.cs.findbugs.annotations.Nullable;
@@ -71,7 +71,7 @@ public final class ImplicitMapping {
                 .filter(c -> c.asInternal().equalsIgnoreCase(column.asInternal()))
                 .collect(Collectors.toList());
         if (matches.size() > 1) {
-          throw new SchemaMismatchException(
+          throw new ConfigException(
               String.format(
                   "Field %s matches several columns of table %s ignoring case: %s",
                   column.asInternal(),
