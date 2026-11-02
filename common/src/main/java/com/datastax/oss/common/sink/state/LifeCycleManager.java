@@ -400,10 +400,6 @@ public class LifeCycleManager {
   @VisibleForTesting
   @NonNull
   static TableMetadata getTableMetadata(CqlSession session, TableConfig tableConfig) {
-    Optional<TableMetadata> found = findTableMetadata(session, tableConfig);
-    if (found.isPresent()) {
-      return found.get();
-    }
     CqlIdentifier keyspaceName = tableConfig.getKeyspace();
     CqlIdentifier tableName = tableConfig.getTable();
     Metadata metadata = session.getMetadata();

@@ -69,8 +69,8 @@ class AbstractSinkRecordTest {
 
     AbstractSinkRecord record = record(key, value);
 
-    assertThat(record.keySchemaIdentity()).isSameAs(key.schemaIdentity());
-    assertThat(record.valueSchemaIdentity()).isSameAs(value.schemaIdentity());
+    assertThat(record.keySchemaIdentity()).isSameAs(key);
+    assertThat(record.valueSchemaIdentity()).isSameAs(value);
     assertThat(record(null, null).keySchemaIdentity()).isNull();
     assertThat(record(null, null).valueSchemaIdentity()).isNull();
   }

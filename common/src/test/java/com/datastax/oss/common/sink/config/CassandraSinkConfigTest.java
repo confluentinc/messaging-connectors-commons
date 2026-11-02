@@ -988,16 +988,6 @@ class CassandraSinkConfigTest {
     assertThat(c.getKeyspaceReplicationFactor()).isEqualTo(3);
     assertThat(c.getMappingMode()).isEqualTo(MappingMode.EXPLICIT);
     assertThat(c.getKeyspace()).isEmpty();
-    assertThat(c.isSchemaManagementEnabled()).isFalse();
-  }
-
-  @Test
-  void should_enable_schema_management_when_any_flag_set() {
-    for (String opt : new String[] {"createKeyspace", "createTable", "evolveTable"}) {
-      Map<String, String> props = explicitBase();
-      props.put(opt, "true");
-      assertThat(new CassandraSinkConfig(props).isSchemaManagementEnabled()).isTrue();
-    }
   }
 
   @Test

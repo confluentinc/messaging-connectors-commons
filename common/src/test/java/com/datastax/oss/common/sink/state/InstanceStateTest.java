@@ -135,7 +135,6 @@ class InstanceStateTest {
   @Test
   void pass_through_is_used_when_only_create_keyspace_on() {
     when(config.isCreateKeyspace()).thenReturn(true);
-    when(config.isSchemaManagementEnabled()).thenReturn(true);
 
     assertThat(
             new InstanceState(config, session, topicStates, new MetricRegistry())

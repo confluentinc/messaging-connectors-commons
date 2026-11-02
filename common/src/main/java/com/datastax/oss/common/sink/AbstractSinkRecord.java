@@ -64,15 +64,13 @@ public interface AbstractSinkRecord {
     return null;
   }
 
-  /** Identity of the key schema (see {@link AbstractSchema#schemaIdentity()}), or null. */
+  /** Object whose reference identifies the key schema version, or null if schemaless. */
   default Object keySchemaIdentity() {
-    AbstractSchema schema = keySchema();
-    return schema == null ? null : schema.schemaIdentity();
+    return keySchema();
   }
 
-  /** Identity of the value schema (see {@link AbstractSchema#schemaIdentity()}), or null. */
+  /** Object whose reference identifies the value schema version, or null if schemaless. */
   default Object valueSchemaIdentity() {
-    AbstractSchema schema = valueSchema();
-    return schema == null ? null : schema.schemaIdentity();
+    return valueSchema();
   }
 }

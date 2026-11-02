@@ -224,19 +224,19 @@ public class CassandraSinkConfig {
               ConfigDef.Type.BOOLEAN,
               false,
               ConfigDef.Importance.LOW,
-              "Whether to create the keyspace if it does not exist")
+              "Automatically create the keyspace if it does not exist")
           .define(
               CREATE_TABLE_OPT,
               ConfigDef.Type.BOOLEAN,
               false,
               ConfigDef.Importance.LOW,
-              "Whether to create the table if it does not exist")
+              "Automatically create the table if it does not exist")
           .define(
               EVOLVE_TABLE_OPT,
               ConfigDef.Type.BOOLEAN,
               false,
               ConfigDef.Importance.LOW,
-              "Whether to add missing columns to an existing table")
+              "Automatically evolve the table schema")
           .define(
               KEYSPACE_REPLICATION_FACTOR_OPT,
               ConfigDef.Type.INT,
@@ -748,13 +748,6 @@ public class CassandraSinkConfig {
   /** Builds the implicit binding for a topic first seen at runtime. */
   public TopicConfig implicitTopicConfig(String topic) {
     return TopicConfig.implicit(topic, Collections.emptyMap(), getKeyspace().get(), isCloud());
-  }
-
-  public boolean isSchemaManagementEnabled() {
-    return isCreateKeyspace()
-        || isCreateTable()
-        || isEvolveTable()
-        || getMappingMode() == MappingMode.IMPLICIT;
   }
 
   public int getMaxNumberOfRecordsInBatch() {

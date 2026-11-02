@@ -30,11 +30,6 @@ public interface AbstractSchema {
     return null;
   }
 
-  /** Stable reference for cheap identity comparison of schemas. */
-  default Object schemaIdentity() {
-    return this;
-  }
-
   /**
    * The type of a schema. These only include the core types; logical types must be determined by
    * checking the schema name.

@@ -160,8 +160,8 @@ class DdlSchemaReconcilerTest {
     when(record.topic()).thenReturn(TOPIC);
     when(record.keySchema()).thenReturn(key);
     when(record.valueSchema()).thenReturn(value);
-    when(record.keySchemaIdentity()).thenReturn(key == null ? null : key.schemaIdentity());
-    when(record.valueSchemaIdentity()).thenReturn(value == null ? null : value.schemaIdentity());
+    when(record.keySchemaIdentity()).thenReturn(key);
+    when(record.valueSchemaIdentity()).thenReturn(value);
     when(record.value()).thenReturn(new Object());
     return record;
   }
