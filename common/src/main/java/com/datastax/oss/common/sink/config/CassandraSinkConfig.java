@@ -243,7 +243,7 @@ public class CassandraSinkConfig {
               3,
               ConfigDef.Range.atLeast(1),
               ConfigDef.Importance.LOW,
-              "Replication factor used when creating a keyspace (ignored for cloud deployments)")
+              "Replication factor used when creating a keyspace on Cassandra/DSE (ignored on Astra)")
           .define(
               MAPPING_MODE_OPT,
               ConfigDef.Type.STRING,
