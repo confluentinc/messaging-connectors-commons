@@ -475,6 +475,22 @@ public class LifeCycleManager {
     keyspaces.forEach(ks -> creator.ensureKeyspace(session, ks));
   }
 
+  /** Builds the InstanceState, closing the session if that fails. */
+  @VisibleForTesting
+  @NonNull
+  static InstanceState buildInstanceStateOrClose(CqlSession session, CassandraSinkConfig config) {
+    try {
+      return buildInstanceState(session, config);
+    } catch (RuntimeException | Error e) {
+      try {
+        session.close();
+      } catch (RuntimeException closeError) {
+        e.addSuppressed(closeError);
+      }
+      throw e;
+    }
+  }
+
   /**
    * Perform heavy lifting of creating an InstanceState:
    *
@@ -493,22 +509,6 @@ public class LifeCycleManager {
    * @param config the sink config
    * @return a new InstanceState
    */
-  /** Builds the InstanceState, closing the session if that fails. */
-  @VisibleForTesting
-  @NonNull
-  static InstanceState buildInstanceStateOrClose(CqlSession session, CassandraSinkConfig config) {
-    try {
-      return buildInstanceState(session, config);
-    } catch (RuntimeException | Error e) {
-      try {
-        session.close();
-      } catch (RuntimeException closeError) {
-        e.addSuppressed(closeError);
-      }
-      throw e;
-    }
-  }
-
   @NonNull
   private static InstanceState buildInstanceState(CqlSession session, CassandraSinkConfig config) {
 
