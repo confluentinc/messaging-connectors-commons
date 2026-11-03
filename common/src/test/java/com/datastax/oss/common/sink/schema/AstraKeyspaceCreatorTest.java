@@ -132,7 +132,7 @@ class AstraKeyspaceCreatorTest {
 
   @Nested
   class SecureConnectBundle {
-    private final String dbId = "0d2f67cc-7a69-4637-b059-0604c05e3766";
+    private final String dbId = "11111111-2222-3333-4444-555555555555";
 
     @TempDir Path dir;
 
