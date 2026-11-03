@@ -17,6 +17,7 @@ package com.datastax.oss.common.sink.state;
 
 import static com.datastax.dse.driver.api.core.config.DseDriverOption.AUTH_PROVIDER_SASL_PROPERTIES;
 import static com.datastax.dse.driver.api.core.config.DseDriverOption.AUTH_PROVIDER_SERVICE;
+import static com.datastax.oss.common.sink.config.CassandraSinkConfig.SECURE_CONNECT_BUNDLE_DRIVER_SETTING;
 import static com.datastax.oss.common.sink.config.TableConfig.MAPPING_OPT;
 import static com.datastax.oss.common.sink.util.UUIDUtil.generateClientId;
 import static com.datastax.oss.driver.api.core.config.DefaultDriverOption.AUTH_PROVIDER_CLASS;
@@ -38,9 +39,12 @@ import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.common.sink.config.AuthenticatorConfig;
 import com.datastax.oss.common.sink.config.CassandraSinkConfig;
 import com.datastax.oss.common.sink.config.ContactPointsValidator;
+import com.datastax.oss.common.sink.config.MappingMode;
 import com.datastax.oss.common.sink.config.SslConfig;
 import com.datastax.oss.common.sink.config.TableConfig;
 import com.datastax.oss.common.sink.config.TopicConfig;
+import com.datastax.oss.common.sink.schema.AstraKeyspaceCreator;
+import com.datastax.oss.common.sink.schema.KeyspaceCreator;
 import com.datastax.oss.common.sink.ssl.SessionBuilder;
 import com.datastax.oss.common.sink.util.SinkUtil;
 import com.datastax.oss.common.sink.util.StringUtil;
@@ -74,9 +78,11 @@ import java.net.InetSocketAddress;
 import java.nio.file.Path;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -92,6 +98,7 @@ import org.slf4j.LoggerFactory;
  */
 public class LifeCycleManager {
 
+  private static final int ASTRA_API_TIMEOUT_MILLIS = 30_000;
   private static final Logger log = LoggerFactory.getLogger(LifeCycleManager.class);
   private static final ConcurrentMap<String, InstanceState> INSTANCE_STATES =
       new ConcurrentHashMap<>();
@@ -131,7 +138,7 @@ public class LifeCycleManager {
             x -> {
               CassandraSinkConfig config = new CassandraSinkConfig(props);
               CqlSession session = buildCqlSession(config, task.version(), task.applicationName());
-              return buildInstanceState(session, config);
+              return buildInstanceStateOrClose(session, config);
             });
     instanceState.registerTask(task);
     return instanceState;
@@ -161,8 +168,11 @@ public class LifeCycleManager {
    */
   @VisibleForTesting
   static boolean validateMappingColumns(TableMetadata table, TableConfig tableConfig) {
-    Map<CqlIdentifier, CqlIdentifier> mapping = tableConfig.getMapping();
+    return validateMappingColumns(table, tableConfig, tableConfig.getMapping());
+  }
 
+  private static boolean validateMappingColumns(
+      TableMetadata table, TableConfig tableConfig, Map<CqlIdentifier, CqlIdentifier> mapping) {
     // The columns in the mapping are the keys. Check that each exists in the table.
     String nonExistentCols =
         mapping
@@ -176,7 +186,7 @@ public class LifeCycleManager {
     if (!StringUtil.isEmpty(nonExistentCols)) {
       throw new ConfigException(
           tableConfig.getSettingPath(MAPPING_OPT),
-          tableConfig.getMappingString(),
+          mappingText(tableConfig, mapping),
           String.format(
               "The following columns do not exist in table %s: %s",
               tableConfig.getTable().asInternal(), nonExistentCols));
@@ -194,13 +204,25 @@ public class LifeCycleManager {
     if (!StringUtil.isEmpty(nonExistentKeyCols)) {
       throw new ConfigException(
           tableConfig.getSettingPath(MAPPING_OPT),
-          tableConfig.getMappingString(),
+          mappingText(tableConfig, mapping),
           String.format(
               "The following columns are part of the primary key but are not mapped: %s",
               nonExistentKeyCols));
     }
 
     return mapping.keySet().size() == table.getColumns().size();
+  }
+
+  private static String mappingText(
+      TableConfig tableConfig, Map<CqlIdentifier, CqlIdentifier> mapping) {
+    if (!tableConfig.isImplicit()) {
+      return tableConfig.getMappingString();
+    }
+    return mapping
+        .entrySet()
+        .stream()
+        .map(e -> e.getKey().asCql(true) + "=" + e.getValue().asInternal())
+        .collect(Collectors.joining(", "));
   }
 
   /**
@@ -212,7 +234,12 @@ public class LifeCycleManager {
   @VisibleForTesting
   @NonNull
   static String makeInsertStatement(TableConfig config) {
-    Map<CqlIdentifier, CqlIdentifier> mapping = config.getMapping();
+    return makeInsertStatement(config, config.getMapping());
+  }
+
+  @NonNull
+  private static String makeInsertStatement(
+      TableConfig config, Map<CqlIdentifier, CqlIdentifier> mapping) {
     StringBuilder statementBuilder = new StringBuilder("INSERT INTO ");
     statementBuilder
         .append(config.getKeyspace().asCql(true))
@@ -265,6 +292,12 @@ public class LifeCycleManager {
   @VisibleForTesting
   @NonNull
   static String makeUpdateCounterStatement(TableConfig config, TableMetadata table) {
+    return makeUpdateCounterStatement(config, table, config.getMapping());
+  }
+
+  @NonNull
+  private static String makeUpdateCounterStatement(
+      TableConfig config, TableMetadata table, Map<CqlIdentifier, CqlIdentifier> mapping) {
     if (config.getTtl() != -1 || config.hasTtlMappingColumn()) {
       throw new ConfigException("Cannot set ttl when updating a counter table");
     }
@@ -273,7 +306,6 @@ public class LifeCycleManager {
     // UPDATE ks.table SET col1 = col1 + :col1, col2 = col2 + :col2, ...
     // WHERE pk1 = :pk1 AND pk2 = :pk2 ...
 
-    Map<CqlIdentifier, CqlIdentifier> mapping = config.getMapping();
     StringBuilder statementBuilder = new StringBuilder("UPDATE ");
     statementBuilder
         .append(config.getKeyspace().asCql(true))
@@ -400,8 +432,47 @@ public class LifeCycleManager {
     return table.get();
   }
 
+  /** Returns the table's metadata, or empty if the keyspace or table does not exist. */
+  @NonNull
+  static Optional<TableMetadata> findTableMetadata(CqlSession session, TableConfig tableConfig) {
+    return session
+        .getMetadata()
+        .getKeyspace(tableConfig.getKeyspace())
+        .flatMap(ks -> ks.getTable(tableConfig.getTable()));
+  }
+
   private static boolean isCounterTable(TableMetadata table) {
     return table.getColumns().values().stream().anyMatch(c -> c.getType() == DataTypes.COUNTER);
+  }
+
+  /** Returns the keyspace creator for the config, or null when createKeyspace is off. */
+  @VisibleForTesting
+  @Nullable
+  static KeyspaceCreator keyspaceCreatorFor(CassandraSinkConfig config) {
+    if (!config.isCreateKeyspace()) {
+      return null;
+    }
+    if (config.isCloud()) {
+      return new AstraKeyspaceCreator(
+          config.getJavaDriverSettings().get(SECURE_CONNECT_BUNDLE_DRIVER_SETTING),
+          config.getAuthenticatorConfig().getPassword(),
+          ASTRA_API_TIMEOUT_MILLIS);
+    }
+    return new KeyspaceCreator.Cql(config.getKeyspaceReplicationFactor());
+  }
+
+  @VisibleForTesting
+  static void ensureKeyspaces(
+      CqlSession session, CassandraSinkConfig config, KeyspaceCreator creator) {
+    Set<CqlIdentifier> keyspaces = new LinkedHashSet<>();
+    if (config.getMappingMode() == MappingMode.IMPLICIT) {
+      config.getKeyspaceIdentifier().ifPresent(keyspaces::add);
+    }
+    config
+        .getTopicConfigs()
+        .values()
+        .forEach(t -> t.getTableConfigs().forEach(tc -> keyspaces.add(tc.getKeyspace())));
+    keyspaces.forEach(ks -> creator.ensureKeyspace(session, ks));
   }
 
   /**
@@ -422,8 +493,30 @@ public class LifeCycleManager {
    * @param config the sink config
    * @return a new InstanceState
    */
+  /** Builds the InstanceState, closing the session if that fails. */
+  @VisibleForTesting
+  @NonNull
+  static InstanceState buildInstanceStateOrClose(CqlSession session, CassandraSinkConfig config) {
+    try {
+      return buildInstanceState(session, config);
+    } catch (RuntimeException | Error e) {
+      try {
+        session.close();
+      } catch (RuntimeException closeError) {
+        e.addSuppressed(closeError);
+      }
+      throw e;
+    }
+  }
+
   @NonNull
   private static InstanceState buildInstanceState(CqlSession session, CassandraSinkConfig config) {
+
+    KeyspaceCreator keyspaceCreator = keyspaceCreatorFor(config);
+    if (keyspaceCreator != null) {
+      ensureKeyspaces(session, config, keyspaceCreator);
+    }
+    checkImplicitKeyspace(session, config);
 
     // Compute the primary keys of all tables being mapped to (across topics).
     Map<String, List<CqlIdentifier>> primaryKeys = new HashMap<>();
@@ -442,9 +535,7 @@ public class LifeCycleManager {
             .stream()
             .map(
                 topicConfig -> {
-                  ConvertingCodecFactory codecFactory =
-                      topicConfig.createCodecFactory(CODEC_REGISTRY);
-                  TopicState topicState = new TopicState(codecFactory);
+                  TopicState topicState = new TopicState(codecFactory(topicConfig));
                   topicStates.put(topicConfig.getTopicName(), topicState);
 
                   return topicConfig
@@ -452,6 +543,10 @@ public class LifeCycleManager {
                       .stream()
                       .map(
                           tableConfig -> {
+                            if (isPendingTable(session, config, tableConfig)) {
+                              topicState.addPendingTable(tableConfig);
+                              return CompletableFuture.<Void>completedFuture(null);
+                            }
                             TableMetadata table = getTableMetadata(session, tableConfig);
                             // Save off the primary key of the table, if we haven't done so
                             // already.
@@ -490,6 +585,54 @@ public class LifeCycleManager {
         });
 
     return new InstanceState(config, session, topicStates, metricRegistry);
+  }
+
+  /** Fails like an explicit binding when the implicit keyspace is missing and not created. */
+  @VisibleForTesting
+  static void checkImplicitKeyspace(CqlSession session, CassandraSinkConfig config) {
+    if (config.getMappingMode() != MappingMode.IMPLICIT || config.isCreateKeyspace()) {
+      return;
+    }
+    CqlIdentifier keyspace = config.getKeyspaceIdentifier().get();
+    if (!session.getMetadata().getKeyspace(keyspace).isPresent()) {
+      throw new ConfigException(
+          String.format("Keyspace %s does not exist.", keyspace.asInternal()));
+    }
+  }
+
+  /** True for implicit bindings, a missing table or (evolveTable) missing value columns. */
+  @VisibleForTesting
+  static boolean isPendingTable(
+      CqlSession session, CassandraSinkConfig config, TableConfig tableConfig) {
+    if (tableConfig.isImplicit()) {
+      return true;
+    }
+    if ((!config.isCreateTable() && !config.isEvolveTable())
+        || !session.getMetadata().getKeyspace(tableConfig.getKeyspace()).isPresent()) {
+      return false;
+    }
+    Optional<TableMetadata> table = findTableMetadata(session, tableConfig);
+    if (!table.isPresent()) {
+      if (config.isCreateTable()) {
+        String problem = DdlSchemaReconciler.createTableProblem(tableConfig);
+        if (problem != null) {
+          throw new ConfigException(
+              tableConfig.getSettingPath(MAPPING_OPT), tableConfig.getMappingString(), problem);
+        }
+      }
+      return config.isCreateTable();
+    }
+    if (!config.isEvolveTable() || tableConfig.isQueryProvided()) {
+      return false;
+    }
+    List<Map.Entry<CqlIdentifier, CqlIdentifier>> missing =
+        DdlSchemaReconciler.missingColumns(table.get(), tableConfig.getMapping());
+    return !missing.isEmpty()
+        && missing.stream().allMatch(e -> DdlSchemaReconciler.isEvolvableSource(e.getValue()));
+  }
+
+  static ConvertingCodecFactory codecFactory(TopicConfig topicConfig) {
+    return topicConfig.createCodecFactory(CODEC_REGISTRY);
   }
 
   /**
@@ -641,15 +784,29 @@ public class LifeCycleManager {
       TableConfig tableConfig,
       TableMetadata table,
       List<CqlIdentifier> primaryKey) {
+    return prepareStatementsAsync(
+        session, topicState, tableConfig, table, primaryKey, tableConfig.getMapping(), false);
+  }
+
+  /** Prepares statements for the given mapping; replaceExisting swaps any registered mapper. */
+  @NonNull
+  static CompletionStage<Void> prepareStatementsAsync(
+      CqlSession session,
+      TopicState topicState,
+      TableConfig tableConfig,
+      TableMetadata table,
+      List<CqlIdentifier> primaryKey,
+      Map<CqlIdentifier, CqlIdentifier> mapping,
+      boolean replaceExisting) {
 
     // for custom query DELETE not supported yet
     boolean allColumnsMapped = false;
     if (!tableConfig.isQueryProvided()) {
-      allColumnsMapped = validateMappingColumns(table, tableConfig);
+      allColumnsMapped = validateMappingColumns(table, tableConfig, mapping);
       validateTtlConfig(tableConfig);
     }
 
-    String insertUpdateStatement = getInsertUpdateStatement(tableConfig, table);
+    String insertUpdateStatement = getInsertUpdateStatement(tableConfig, table, mapping);
 
     CompletionStage<? extends PreparedStatement> insertUpdateFuture =
         session.prepareAsync(insertUpdateStatement);
@@ -666,9 +823,15 @@ public class LifeCycleManager {
     return insertUpdateFuture
         .thenAcceptBoth(
             deleteFuture,
-            (preparedInsertUpdate, preparedDelete) ->
+            (preparedInsertUpdate, preparedDelete) -> {
+              if (replaceExisting) {
+                topicState.replaceRecordMapper(
+                    tableConfig, primaryKey, preparedInsertUpdate, preparedDelete, mapping);
+              } else {
                 topicState.createRecordMapper(
-                    tableConfig, primaryKey, preparedInsertUpdate, preparedDelete))
+                    tableConfig, primaryKey, preparedInsertUpdate, preparedDelete, mapping);
+              }
+            })
         .exceptionally(
             e -> {
               String statements =
@@ -681,7 +844,8 @@ public class LifeCycleManager {
   }
 
   @NonNull
-  private static String getInsertUpdateStatement(TableConfig tableConfig, TableMetadata table) {
+  private static String getInsertUpdateStatement(
+      TableConfig tableConfig, TableMetadata table, Map<CqlIdentifier, CqlIdentifier> mapping) {
     // if user provides query explicitly it has priority over any connector specific query
     // construction logic
     return tableConfig
@@ -689,8 +853,8 @@ public class LifeCycleManager {
         .orElseGet(
             () ->
                 isCounterTable(table)
-                    ? makeUpdateCounterStatement(tableConfig, table)
-                    : makeInsertStatement(tableConfig));
+                    ? makeUpdateCounterStatement(tableConfig, table, mapping)
+                    : makeInsertStatement(tableConfig, mapping));
   }
 
   private static void validateTtlConfig(TableConfig config) {
