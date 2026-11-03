@@ -30,6 +30,7 @@ import static com.datastax.oss.driver.api.core.config.DefaultDriverOption.SSL_CI
 import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.common.sink.util.SinkUtil;
 import com.datastax.oss.common.sink.util.StringUtil;
+import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.config.DefaultDriverOption;
 import com.datastax.oss.driver.shaded.guava.common.base.Splitter;
 import com.datastax.oss.driver.shaded.guava.common.collect.ImmutableList;
@@ -107,8 +108,15 @@ public class CassandraSinkConfig {
 
   static final String IGNORE_ERRORS = "ignoreErrors";
 
+  static final String CREATE_KEYSPACE_OPT = "createKeyspace";
+  static final String CREATE_TABLE_OPT = "createTable";
+  static final String EVOLVE_TABLE_OPT = "evolveTable";
+  static final String KEYSPACE_REPLICATION_FACTOR_OPT = "keyspaceReplicationFactor";
+  static final String MAPPING_MODE_OPT = "mappingMode";
+  static final String KEYSPACE_OPT = "keyspace";
+
   public static final String SECURE_CONNECT_BUNDLE_OPT = "cloud.secureConnectBundle";
-  static final String SECURE_CONNECT_BUNDLE_DRIVER_SETTING =
+  public static final String SECURE_CONNECT_BUNDLE_DRIVER_SETTING =
       withDriverPrefix(DefaultDriverOption.CLOUD_SECURE_CONNECT_BUNDLE);
 
   static final List<String> JAVA_DRIVER_SETTINGS_LIST_TYPE =
@@ -210,7 +218,47 @@ public class CassandraSinkConfig {
               ConfigDef.Type.STRING,
               "",
               ConfigDef.Importance.HIGH,
-              "The location of the cloud secure bundle used to connect to Datastax Apache Cassandra as a service.");
+              "The location of the cloud secure bundle used to connect to Datastax Apache Cassandra as a service.")
+          .define(
+              CREATE_KEYSPACE_OPT,
+              ConfigDef.Type.BOOLEAN,
+              false,
+              ConfigDef.Importance.LOW,
+              "Automatically create the keyspace if it does not exist")
+          .define(
+              CREATE_TABLE_OPT,
+              ConfigDef.Type.BOOLEAN,
+              false,
+              ConfigDef.Importance.LOW,
+              "Automatically create the table if it does not exist")
+          .define(
+              EVOLVE_TABLE_OPT,
+              ConfigDef.Type.BOOLEAN,
+              false,
+              ConfigDef.Importance.LOW,
+              "Automatically evolve the table schema")
+          .define(
+              KEYSPACE_REPLICATION_FACTOR_OPT,
+              ConfigDef.Type.INT,
+              3,
+              ConfigDef.Range.atLeast(1),
+              ConfigDef.Importance.LOW,
+              "Replication factor used when creating a keyspace on Cassandra/DSE (ignored on Astra)")
+          .define(
+              MAPPING_MODE_OPT,
+              ConfigDef.Type.STRING,
+              MappingMode.EXPLICIT.name(),
+              ConfigDef.ValidString.in(MappingMode.EXPLICIT.name(), MappingMode.IMPLICIT.name()),
+              ConfigDef.Importance.LOW,
+              "EXPLICIT uses the mapping setting of each topic; "
+                  + "IMPLICIT maps record fields to columns of a table named after the topic, "
+                  + "with names lower-cased as in unquoted CQL")
+          .define(
+              KEYSPACE_OPT,
+              ConfigDef.Type.STRING,
+              null,
+              ConfigDef.Importance.LOW,
+              "Keyspace used for all topics when mappingMode=IMPLICIT");
   private static final Function<String, String> TO_SECONDS_CONVERTER =
       v -> String.format("%s seconds", v);
 
@@ -256,6 +304,8 @@ public class CassandraSinkConfig {
       // Put the global settings in an AbstractConfig and make/store a TopicConfig for every
       // topic settings map.
       globalConfig = new AbstractConfig(GLOBAL_CONFIG_DEF, globalSettings, false);
+      validateSchemaManagement(settings);
+      refreshImplicitKeyspace();
 
       populateDriverSettingsWithConnectorSettings(globalSettings);
 
@@ -276,17 +326,32 @@ public class CassandraSinkConfig {
         sslConfig = new SslConfig(sslSettings);
       }
       authConfig = new AuthenticatorConfig(authSettings);
+      validateAstraToken();
       topicConfigs = new HashMap<>();
-      topicSettings.forEach(
-          (name, topicConfigMap) ->
-              topicConfigs.put(name, new TopicConfig(name, topicConfigMap, cloud)));
+      String topicsString = globalSettings.get("topics");
+      if (getMappingMode() == MappingMode.IMPLICIT) {
+        if (topicsString != null) {
+          Splitter.on(",")
+              .trimResults()
+              .omitEmptyStrings()
+              .split(topicsString)
+              .forEach(topic -> topicSettings.computeIfAbsent(topic, t -> new HashMap<>()));
+        }
+        topicSettings.forEach(
+            (name, topicConfigMap) ->
+                topicConfigs.put(
+                    name, TopicConfig.implicit(name, topicConfigMap, getKeyspace().get(), cloud)));
+      } else {
+        topicSettings.forEach(
+            (name, topicConfigMap) ->
+                topicConfigs.put(name, new TopicConfig(name, topicConfigMap, cloud)));
+      }
 
       validateCompressionType();
 
       // Verify that we have a topic section for every topic we're subscribing to, if 'topics'
       // was provided. A user may use topics.regex to subscribe by pattern, in which case,
       // they're on their own.
-      String topicsString = globalSettings.get("topics");
       if (topicsString != null) {
         List<String> topics = Splitter.on(",").trimResults().splitToList(topicsString);
         for (String topic : topics) {
@@ -317,6 +382,55 @@ public class CassandraSinkConfig {
     } catch (org.apache.kafka.common.config.ConfigException err) {
       // convert Kafka config framework exception into our exception
       throw new ConfigException(err.getMessage(), err);
+    }
+  }
+
+  private void validateSchemaManagement(Map<String, String> settings) {
+    if (getMappingMode() != MappingMode.IMPLICIT) {
+      return;
+    }
+    if (!getKeyspace().isPresent()) {
+      throw new ConfigException(
+          KEYSPACE_OPT, null, "keyspace is required when mappingMode=IMPLICIT");
+    }
+    for (String name : settings.keySet()) {
+      Matcher m = TOPIC_KS_TABLE_SETTING_PATTERN.matcher(name);
+      if (m.matches()) {
+        throw new ConfigException(
+            name,
+            settings.get(name),
+            String.format(
+                "%s must not be set when mappingMode=IMPLICIT "
+                    + "(per-table settings are not supported when mappingMode=IMPLICIT); "
+                    + "use mappingMode=EXPLICIT",
+                m.group(4)));
+      }
+    }
+  }
+
+  // An explicit refreshed-keyspaces list would otherwise hide tables created in the keyspace.
+  private void refreshImplicitKeyspace() {
+    if (getMappingMode() != MappingMode.IMPLICIT) {
+      return;
+    }
+    String prefix = withDriverPrefix(METADATA_SCHEMA_REFRESHED_KEYSPACES) + ".";
+    List<String> refreshed =
+        javaDriverSettings
+            .entrySet()
+            .stream()
+            .filter(e -> e.getKey().startsWith(prefix))
+            .map(Map.Entry::getValue)
+            .collect(Collectors.toList());
+    String keyspace = getKeyspaceIdentifier().get().asInternal();
+    if (!refreshed.isEmpty() && !refreshed.contains(keyspace)) {
+      javaDriverSettings.put(prefix + refreshed.size(), keyspace);
+    }
+  }
+
+  private void validateAstraToken() {
+    if (isCloud() && isCreateKeyspace() && !authConfig.getPassword().startsWith("AstraCS:")) {
+      throw new ConfigException(
+          "createKeyspace on Astra requires an AstraCS application token in auth.password");
     }
   }
 
@@ -599,6 +713,42 @@ public class CassandraSinkConfig {
   @Nullable
   public SslConfig getSslConfig() {
     return sslConfig;
+  }
+
+  public boolean isCreateKeyspace() {
+    return globalConfig.getBoolean(CREATE_KEYSPACE_OPT);
+  }
+
+  public boolean isCreateTable() {
+    return globalConfig.getBoolean(CREATE_TABLE_OPT);
+  }
+
+  public boolean isEvolveTable() {
+    return globalConfig.getBoolean(EVOLVE_TABLE_OPT);
+  }
+
+  public int getKeyspaceReplicationFactor() {
+    return globalConfig.getInt(KEYSPACE_REPLICATION_FACTOR_OPT);
+  }
+
+  public MappingMode getMappingMode() {
+    return MappingMode.valueOf(globalConfig.getString(MAPPING_MODE_OPT));
+  }
+
+  public Optional<String> getKeyspace() {
+    return Optional.ofNullable(globalConfig.getString(KEYSPACE_OPT))
+        .map(String::trim)
+        .filter(v -> !v.isEmpty());
+  }
+
+  /** The global keyspace: lower-cased unless double-quoted, as in CQL. */
+  public Optional<CqlIdentifier> getKeyspaceIdentifier() {
+    return getKeyspace().map(TableConfig::parseCql);
+  }
+
+  /** Builds the implicit binding for a topic first seen at runtime. */
+  public TopicConfig implicitTopicConfig(String topic) {
+    return TopicConfig.implicit(topic, Collections.emptyMap(), getKeyspace().get(), isCloud());
   }
 
   public int getMaxNumberOfRecordsInBatch() {
