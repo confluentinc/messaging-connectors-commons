@@ -172,6 +172,49 @@ class AstraKeyspaceCreatorTest {
     }
 
     @Test
+    void should_not_expose_invalid_config_json_in_errors() throws IOException {
+      Path zip = bundle("{\"host\":\"x\",\"keyStorePassword\": canary-secret}");
+
+      assertThatThrownBy(() -> AstraKeyspaceCreator.databaseId(zip))
+          .isInstanceOf(FatalSchemaException.class)
+          .hasMessageContaining("not valid JSON")
+          .satisfies(
+              e -> {
+                for (Throwable t = e; t != null; t = t.getCause()) {
+                  assertThat(String.valueOf(t.getMessage())).doesNotContain("canary-secret");
+                }
+              });
+    }
+
+    @Test
+    void should_not_expose_url_user_info_in_errors() throws IOException {
+      HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+      server.createContext(
+          "/",
+          exchange -> {
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+          });
+      server.start();
+      try {
+        int port = server.getAddress().getPort();
+        String location = "http://user:secret@127.0.0.1:" + port + "/scb.zip";
+
+        assertThatThrownBy(() -> AstraKeyspaceCreator.databaseId(location))
+            .isInstanceOf(FatalSchemaException.class)
+            .hasMessageContaining("http://127.0.0.1:" + port + "/scb.zip")
+            .satisfies(
+                e -> {
+                  for (Throwable t = e; t != null; t = t.getCause()) {
+                    assertThat(String.valueOf(t.getMessage())).doesNotContain("secret");
+                  }
+                });
+      } finally {
+        server.stop(0);
+      }
+    }
+
+    @Test
     void should_not_expose_url_query_string_in_errors() throws IOException {
       HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
       server.createContext(
@@ -302,11 +345,12 @@ class AstraKeyspaceCreatorTest {
     @Test
     void should_report_unexpected_response_when_status_body_is_not_json() {
       status = 200;
-      body = "<html>gateway</html>";
+      body = "canary-body";
 
       assertThatThrownBy(() -> client().getDatabaseStatus("db1"))
           .isInstanceOf(FatalSchemaException.class)
           .hasMessageContaining("unexpected response from the Astra DevOps API")
+          .hasNoCause()
           .satisfies(e -> assertThat(e.getMessage()).doesNotContain("Cannot reach"));
     }
   }
