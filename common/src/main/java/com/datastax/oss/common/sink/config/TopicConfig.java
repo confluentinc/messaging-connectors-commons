@@ -26,6 +26,7 @@ import edu.umd.cs.findbugs.annotations.NonNull;
 import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -95,6 +96,19 @@ public class TopicConfig extends AbstractConfig {
             .map(TableConfig.Builder::build)
             .collect(Collectors.toList());
     this.topicName = topicName;
+  }
+
+  private TopicConfig(String topicName, Map<String, String> settings, TableConfig tableConfig) {
+    super(makeTopicConfigDef(topicName), settings, false);
+    this.topicName = topicName;
+    this.tableConfigs = Collections.singletonList(tableConfig);
+  }
+
+  /** A topic bound to its implicit table; settings may hold topic codec settings only. */
+  @NonNull
+  public static TopicConfig implicit(
+      String topicName, Map<String, String> settings, String keyspace, boolean cloud) {
+    return new TopicConfig(topicName, settings, TableConfig.implicit(topicName, keyspace, cloud));
   }
 
   @NonNull
