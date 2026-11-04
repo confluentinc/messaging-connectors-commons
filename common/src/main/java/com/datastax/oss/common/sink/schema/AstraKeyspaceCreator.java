@@ -106,26 +106,29 @@ public class AstraKeyspaceCreator implements KeyspaceCreator {
 
   /** Reads the database id from a secure connect bundle given as a file path or a URL. */
   static String databaseId(String location) {
+    URL url;
     try {
-      URL url;
-      try {
-        url = new URL(location);
-      } catch (MalformedURLException e) {
-        return databaseId(Paths.get(location));
-      }
-      try (InputStream in = url.openStream()) {
-        return databaseId(in);
-      }
+      url = new URL(location);
+    } catch (MalformedURLException e) {
+      return databaseId(Paths.get(location));
+    }
+    try (InputStream in = url.openStream()) {
+      return databaseId(in);
     } catch (IOException e) {
-      int query = location.indexOf('?');
-      if (query < 0) {
+      if (url.getUserInfo() == null && url.getQuery() == null) {
         throw new FatalSchemaException("Cannot read secure connect bundle " + location, e);
       }
-      // The query string may hold a signature, and the cause message may repeat the full URL.
+      // The user info may hold a password and the query string a signature, and the cause message
+      // may repeat the full URL.
+      String shown =
+          url.getProtocol()
+              + "://"
+              + url.getHost()
+              + (url.getPort() < 0 ? "" : ":" + url.getPort())
+              + url.getPath();
       throw new FatalSchemaException(
           String.format(
-              "Cannot read secure connect bundle %s (%s)",
-              location.substring(0, query), e.getClass().getSimpleName()));
+              "Cannot read secure connect bundle %s (%s)", shown, e.getClass().getSimpleName()));
     }
   }
 
@@ -141,7 +144,14 @@ public class AstraKeyspaceCreator implements KeyspaceCreator {
     ZipInputStream zip = new ZipInputStream(in);
     for (ZipEntry entry = zip.getNextEntry(); entry != null; entry = zip.getNextEntry()) {
       if (entry.getName().equals("config.json")) {
-        JsonNode host = new ObjectMapper().readTree(zip).get("host");
+        JsonNode root;
+        try {
+          root = new ObjectMapper().readTree(zip);
+        } catch (JsonProcessingException e) {
+          // config.json holds keystore passwords, and the parse error may quote its content.
+          throw new FatalSchemaException("Secure connect bundle config.json is not valid JSON");
+        }
+        JsonNode host = root == null ? null : root.get("host");
         Matcher m = DB_ID.matcher(host == null ? "" : host.asText());
         if (m.find()) {
           return m.group(1);
@@ -193,11 +203,11 @@ public class AstraKeyspaceCreator implements KeyspaceCreator {
           try {
             root = new ObjectMapper().readTree(in);
           } catch (JsonProcessingException e) {
+            // The parse error may quote the response body.
             throw new FatalSchemaException(
                 String.format(
                     "Received an unexpected response from the Astra DevOps API trying to %s",
-                    action),
-                e);
+                    action));
           }
           JsonNode status = root == null ? null : root.get("status");
           if (status == null) {
