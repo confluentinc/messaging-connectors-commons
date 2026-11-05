@@ -40,6 +40,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -136,6 +137,7 @@ public class DdlSchemaReconciler {
     }
     TableMetadata existing = found.isPresent() ? found.get() : createdTable(tableConfig);
     mapping = ImplicitMapping.resolveColumns(mapping, existing, tableConfig.getKeyspaceAndTable());
+    requireKeyColumnsInPrimaryKey(tableConfig, existing, mapping);
     TableMetadata table =
         addMissingColumns(
             tableConfig, existing, mapping, source -> sourceType(keySchema, valueSchema, source));
@@ -202,6 +204,28 @@ public class DdlSchemaReconciler {
               tableConfig.getKeyspaceAndTable()));
     }
     createTable(tableConfig, partitionKey, columns);
+  }
+
+  /** Key fields bound to regular columns would merge rows of distinct record keys. */
+  private static void requireKeyColumnsInPrimaryKey(
+      TableConfig tableConfig, TableMetadata table, Map<CqlIdentifier, CqlIdentifier> mapping) {
+    Set<CqlIdentifier> primaryKey =
+        table.getPrimaryKey().stream().map(ColumnMetadata::getName).collect(Collectors.toSet());
+    String regularKeyColumns =
+        mapping
+            .entrySet()
+            .stream()
+            .filter(e -> isKeySourced(e.getValue()))
+            .map(Map.Entry::getKey)
+            .filter(c -> table.getColumn(c).isPresent() && !primaryKey.contains(c))
+            .map(c -> c.asCql(true))
+            .collect(Collectors.joining(", "));
+    if (!regularKeyColumns.isEmpty()) {
+      throw new ConfigException(
+          String.format(
+              "The primary key of table %s does not match the record key fields; key columns not in the primary key: %s",
+              tableConfig.getKeyspaceAndTable(), regularKeyColumns));
+    }
   }
 
   /** Adds missing mapped value columns when evolveTable is on, else fails; returns the table. */

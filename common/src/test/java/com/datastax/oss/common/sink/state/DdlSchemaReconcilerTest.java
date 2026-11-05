@@ -515,6 +515,38 @@ class DdlSchemaReconcilerTest {
     verify(session, never()).execute(any(Statement.class));
   }
 
+  @Test
+  void should_reject_key_field_bound_to_regular_column() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    TableConfig tableConfig = implicitPending("orders");
+    AbstractSchema key =
+        struct(
+            "id",
+            prim(AbstractSchema.Type.INT64, null),
+            "name",
+            prim(AbstractSchema.Type.STRING, null));
+
+    assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, record(key, valueSchema)))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining("primary key of table shop.orders does not match the record key")
+        .hasMessageContaining("key columns not in the primary key: name");
+    verify(session, never()).prepareAsync(anyString());
+  }
+
+  @Test
+  void should_prepare_implicit_delete_when_table_has_columns_outside_the_schema() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    CqlIdentifier email = CqlIdentifier.fromInternal("email");
+    ColumnMetadata emailColumn = column(email, DataTypes.TEXT);
+    when(table.getColumn(email)).thenReturn(Optional.of(emailColumn));
+    table.getColumns().put(email, emailColumn);
+    TableConfig tableConfig = implicitPending("orders");
+
+    reconciler().mapperFor(tableConfig, record(keySchema, valueSchema));
+
+    verify(session).prepareAsync(startsWith("DELETE FROM shop.orders WHERE id = :id"));
+  }
+
   private static ColumnMetadata column(CqlIdentifier name, DataType type) {
     ColumnMetadata col = mock(ColumnMetadata.class);
     when(col.getName()).thenReturn(name);
