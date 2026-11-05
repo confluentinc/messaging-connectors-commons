@@ -812,7 +812,8 @@ public class LifeCycleManager {
         session.prepareAsync(insertUpdateStatement);
     CompletionStage<? extends PreparedStatement> deleteFuture;
     String deleteStatement = makeDeleteStatement(tableConfig, table);
-    if (tableConfig.isDeletesEnabled() && allColumnsMapped) {
+    // Implicit tables keep columns of older schemas, so full coverage cannot gate deletes there.
+    if (tableConfig.isDeletesEnabled() && (allColumnsMapped || tableConfig.isImplicit())) {
       deleteFuture = session.prepareAsync(deleteStatement);
     } else {
       // Make a dummy future that's already completed since there is no work to do here.
