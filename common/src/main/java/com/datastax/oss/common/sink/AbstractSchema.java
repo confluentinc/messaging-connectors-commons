@@ -25,6 +25,11 @@ public interface AbstractSchema {
 
   public AbstractSchema keySchema();
 
+  /** Logical type name, or null. */
+  default String name() {
+    return null;
+  }
+
   /**
    * The type of a schema. These only include the core types; logical types must be determined by
    * checking the schema name.
