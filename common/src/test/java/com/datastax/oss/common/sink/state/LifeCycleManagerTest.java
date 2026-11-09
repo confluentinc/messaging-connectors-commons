@@ -25,12 +25,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.common.sink.config.CassandraSinkConfig;
 import com.datastax.oss.common.sink.config.TableConfig;
 import com.datastax.oss.common.sink.config.TableConfigBuilder;
+import com.datastax.oss.common.sink.schema.KeyspaceCreator;
 import com.datastax.oss.common.sink.util.SinkUtil;
 import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.CqlSession;
@@ -340,6 +344,228 @@ class LifeCycleManagerTest {
     assertThatThrownBy(() -> new CassandraSinkConfig(config))
         .isInstanceOf(ConfigException.class)
         .hasMessageContaining(DC_OPT);
+  }
+
+  private static Map<String, String> baseProps() {
+    Map<String, String> props = new java.util.HashMap<>();
+    props.put("contactPoints", "127.0.0.1");
+    props.put("loadBalancing.localDc", "dc1");
+    props.put("topics", "t1,t2");
+    props.put("topic.t1.shop.a.mapping", "c1=value.f1");
+    props.put("topic.t2.shop.b.mapping", "c1=value.f1");
+    return props;
+  }
+
+  @Test
+  void should_not_create_keyspace_creator_when_flag_off() {
+    assertThat(LifeCycleManager.keyspaceCreatorFor(new CassandraSinkConfig(baseProps()))).isNull();
+  }
+
+  @Test
+  void should_create_cql_keyspace_creator_when_flag_on() {
+    Map<String, String> props = baseProps();
+    props.put("createKeyspace", "true");
+
+    assertThat(LifeCycleManager.keyspaceCreatorFor(new CassandraSinkConfig(props)))
+        .isInstanceOf(KeyspaceCreator.Cql.class);
+  }
+
+  @Test
+  void should_ensure_each_distinct_keyspace_once() {
+    CassandraSinkConfig config = new CassandraSinkConfig(baseProps());
+    KeyspaceCreator creator = mock(KeyspaceCreator.class);
+
+    LifeCycleManager.ensureKeyspaces(session, config, creator);
+
+    verify(creator, times(1)).ensureKeyspace(session, CqlIdentifier.fromInternal("shop"));
+  }
+
+  @Test
+  void should_ignore_global_keyspace_in_explicit_mode() {
+    Map<String, String> props = baseProps();
+    props.put("keyspace", "unused");
+    KeyspaceCreator creator = mock(KeyspaceCreator.class);
+
+    LifeCycleManager.ensureKeyspaces(session, new CassandraSinkConfig(props), creator);
+
+    verify(creator, times(1)).ensureKeyspace(session, CqlIdentifier.fromInternal("shop"));
+    verifyNoMoreInteractions(creator);
+  }
+
+  @Test
+  void should_find_table_metadata_or_empty() {
+    when(keyspace.getTable(CqlIdentifier.fromInternal("missing"))).thenReturn(Optional.empty());
+
+    assertThat(
+            LifeCycleManager.findTableMetadata(
+                session, makeTableConfig("ks", "mytable", "c1=value.f1")))
+        .contains(table);
+    assertThat(
+            LifeCycleManager.findTableMetadata(
+                session, makeTableConfig("ks", "missing", "c1=value.f1")))
+        .isEmpty();
+    when(metadata.getKeyspace(any(CqlIdentifier.class))).thenReturn(Optional.empty());
+    assertThat(
+            LifeCycleManager.findTableMetadata(
+                session, makeTableConfig("ks", "mytable", "c1=value.f1")))
+        .isEmpty();
+  }
+
+  @Test
+  void should_leave_missing_table_pending_only_when_create_table_on() {
+    TableConfig missing = makeTableConfig("ks", "missing", "c1=key.f1");
+    when(keyspace.getTable(CqlIdentifier.fromInternal("missing"))).thenReturn(Optional.empty());
+    Map<String, String> props = baseProps();
+    CassandraSinkConfig off = new CassandraSinkConfig(props);
+    props.put("createTable", "true");
+    CassandraSinkConfig on = new CassandraSinkConfig(props);
+
+    assertThat(LifeCycleManager.isPendingTable(session, on, missing)).isTrue();
+    assertThat(LifeCycleManager.isPendingTable(session, off, missing)).isFalse();
+    assertThat(
+            LifeCycleManager.isPendingTable(
+                session, on, makeTableConfig("ks", "mytable", "c1=value.f1")))
+        .isFalse();
+    when(metadata.getKeyspace(any(CqlIdentifier.class))).thenReturn(Optional.empty());
+    assertThat(LifeCycleManager.isPendingTable(session, on, missing)).isFalse();
+  }
+
+  @Test
+  void should_leave_binding_with_missing_value_column_pending_only_when_evolve_on() {
+    TableConfig missingValue =
+        makeTableConfig("ks", "mytable", String.format("%s=key.f1, nocol=value.f3", C1));
+    TableConfig missingKey =
+        makeTableConfig("ks", "mytable", String.format("%s=key.f1, nocol=key.f3", C1));
+    Map<String, String> props = baseProps();
+    CassandraSinkConfig off = new CassandraSinkConfig(props);
+    props.put("evolveTable", "true");
+    CassandraSinkConfig on = new CassandraSinkConfig(props);
+
+    assertThat(LifeCycleManager.isPendingTable(session, on, missingValue)).isTrue();
+    assertThat(LifeCycleManager.isPendingTable(session, off, missingValue)).isFalse();
+    assertThat(LifeCycleManager.isPendingTable(session, on, missingKey)).isFalse();
+    assertThat(
+            LifeCycleManager.isPendingTable(
+                session,
+                on,
+                makeTableConfig("ks", "mytable", String.format("%s=key.f1, nocol=header.h", C1))))
+        .isFalse();
+    assertThat(
+            LifeCycleManager.isPendingTable(
+                session,
+                on,
+                makeTableConfig("ks", "mytable", String.format("%s=key.f1, nocol=now()", C1))))
+        .isTrue();
+    assertThat(
+            LifeCycleManager.isPendingTable(
+                session, on, makeTableConfig("ks", "mytable", C1 + "=key.f1")))
+        .isFalse();
+  }
+
+  @Test
+  void should_fail_start_when_missing_table_cannot_be_created_from_mapping() {
+    when(keyspace.getTable(CqlIdentifier.fromInternal("missing"))).thenReturn(Optional.empty());
+    Map<String, String> props = baseProps();
+    props.put("createTable", "true");
+    CassandraSinkConfig on = new CassandraSinkConfig(props);
+
+    assertThatThrownBy(
+            () ->
+                LifeCycleManager.isPendingTable(
+                    session, on, makeTableConfig("ks", "missing", "c1=value.f1, c2=now()")))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining(
+            "Cannot create table ks.missing: no mapped column comes from the record key");
+    assertThatThrownBy(
+            () ->
+                LifeCycleManager.isPendingTable(
+                    session, on, makeTableConfig("ks", "missing", "c1=key.f1, c2=header.h")))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining(
+            "Cannot derive a column type for header.h in table ks.missing; define the column manually");
+    assertThat(
+            LifeCycleManager.isPendingTable(
+                session,
+                on,
+                makeTableConfig("ks", "missing", "c1=key, c2=value.f2, c3=now(), __ttl=value.t")))
+        .isTrue();
+  }
+
+  @Test
+  void should_close_session_when_building_state_fails() {
+    when(metadata.getKeyspace(CqlIdentifier.fromInternal("shop"))).thenReturn(Optional.empty());
+
+    assertThatThrownBy(
+            () ->
+                LifeCycleManager.buildInstanceStateOrClose(
+                    session, new CassandraSinkConfig(implicitProps("shop"))))
+        .isInstanceOf(ConfigException.class);
+    verify(session).close();
+  }
+
+  private static Map<String, String> implicitProps(String keyspace) {
+    Map<String, String> props = new java.util.HashMap<>();
+    props.put("contactPoints", "127.0.0.1");
+    props.put("loadBalancing.localDc", "dc1");
+    props.put("topics", "t1");
+    props.put("mappingMode", "IMPLICIT");
+    props.put("keyspace", keyspace);
+    return props;
+  }
+
+  @Test
+  void should_ensure_implicit_keyspace_parsed_like_bindings() {
+    KeyspaceCreator creator = mock(KeyspaceCreator.class);
+
+    LifeCycleManager.ensureKeyspaces(
+        session, new CassandraSinkConfig(implicitProps("\"Shop\"")), creator);
+
+    verify(creator, times(1)).ensureKeyspace(session, CqlIdentifier.fromInternal("Shop"));
+  }
+
+  @Test
+  void should_fail_start_when_implicit_keyspace_missing_and_create_keyspace_off() {
+    when(metadata.getKeyspace(CqlIdentifier.fromInternal("shop"))).thenReturn(Optional.empty());
+    Map<String, String> props = implicitProps("shop");
+
+    assertThatThrownBy(
+            () -> LifeCycleManager.checkImplicitKeyspace(session, new CassandraSinkConfig(props)))
+        .isInstanceOf(ConfigException.class)
+        .hasMessage("Keyspace shop does not exist.");
+    props.put("createKeyspace", "true");
+    LifeCycleManager.checkImplicitKeyspace(session, new CassandraSinkConfig(props));
+    LifeCycleManager.checkImplicitKeyspace(session, new CassandraSinkConfig(baseProps()));
+  }
+
+  @Test
+  void should_always_leave_implicit_binding_pending() {
+    CassandraSinkConfig config = new CassandraSinkConfig(implicitProps("ks"));
+
+    assertThat(
+            LifeCycleManager.isPendingTable(
+                session, config, TableConfig.implicit("mytable", "ks", false)))
+        .isTrue();
+  }
+
+  @Test
+  void should_render_effective_mapping_in_implicit_validation_errors() {
+    Map<CqlIdentifier, CqlIdentifier> mapping = new java.util.LinkedHashMap<>();
+    mapping.put(C1_IDENT, CqlIdentifier.fromInternal("key.c1"));
+    mapping.put(CqlIdentifier.fromInternal("email"), CqlIdentifier.fromInternal("value.email"));
+
+    assertThatThrownBy(
+            () ->
+                LifeCycleManager.prepareStatementsAsync(
+                    session,
+                    new TopicState(null),
+                    TableConfig.implicit("mytable", "ks", false),
+                    table,
+                    Collections.singletonList(C1_IDENT),
+                    mapping,
+                    false))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining("c1=key.c1, email=value.email")
+        .hasMessageContaining("The following columns do not exist in table mytable: email");
   }
 
   private static TableConfig makeTableConfig(
