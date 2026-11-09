@@ -69,6 +69,10 @@ public class RecordMapper {
 
   private final boolean isQueryProvided;
 
+  private final boolean deleteOnly;
+
+  private final boolean implicit;
+
   public RecordMapper(
       PreparedStatement insertUpdateStatement,
       PreparedStatement deleteStatement,
@@ -77,6 +81,27 @@ public class RecordMapper {
       boolean allowExtraFields,
       boolean allowMissingFields,
       TableConfig tableConfig) {
+    this(
+        insertUpdateStatement,
+        deleteStatement,
+        primaryKey,
+        mapping,
+        allowExtraFields,
+        allowMissingFields,
+        tableConfig,
+        false);
+  }
+
+  private RecordMapper(
+      PreparedStatement insertUpdateStatement,
+      PreparedStatement deleteStatement,
+      List<CqlIdentifier> primaryKey,
+      Mapping mapping,
+      boolean allowExtraFields,
+      boolean allowMissingFields,
+      TableConfig tableConfig,
+      boolean deleteOnly) {
+    this.deleteOnly = deleteOnly;
     this.insertUpdateStatement = insertUpdateStatement;
     this.deleteStatement = deleteStatement;
     this.primaryKey = new LinkedHashSet<>(primaryKey);
@@ -87,6 +112,17 @@ public class RecordMapper {
     this.ttlTimeUnit = tableConfig.getTtlTimeUnit();
     this.timestampTimeUnit = tableConfig.getTimestampTimeUnit();
     this.isQueryProvided = tableConfig.isQueryProvided();
+    this.implicit = tableConfig.isImplicit();
+  }
+
+  /** Maps every record to a delete by primary key, for tombstones only. */
+  public static RecordMapper deleteOnly(
+      PreparedStatement deleteStatement,
+      List<CqlIdentifier> primaryKey,
+      Mapping mapping,
+      TableConfig tableConfig) {
+    return new RecordMapper(
+        deleteStatement, deleteStatement, primaryKey, mapping, true, false, tableConfig, true);
   }
 
   @NonNull
@@ -113,7 +149,10 @@ public class RecordMapper {
       // do an insert/update.
       preparedStatement = insertUpdateStatement;
     } else {
-      isInsertUpdate = isInsertUpdate(record, mapping, primaryKey);
+      // Implicit records may omit columns of newer schemas, so only tombstones delete there.
+      isInsertUpdate =
+          !deleteOnly
+              && (implicit ? !isTombstone(record) : isInsertUpdate(record, mapping, primaryKey));
       preparedStatement = isInsertUpdate ? insertUpdateStatement : deleteStatement;
     }
     BoundStatementBuilder builder = preparedStatement.boundStatementBuilder();
@@ -378,6 +417,11 @@ public class RecordMapper {
 
   private static boolean noFieldInRecord(Set<String> recordFields, CqlIdentifier field) {
     return !recordFields.contains(field.asInternal());
+  }
+
+  private static boolean isTombstone(Record record) {
+    return isValueSelfOnlyValueField(record.fields())
+        && record.getFieldValue(RawData.VALUE_FIELD_NAME) == null;
   }
 
   private static boolean isValueSelfOnlyValueField(Set<String> recordFields) {

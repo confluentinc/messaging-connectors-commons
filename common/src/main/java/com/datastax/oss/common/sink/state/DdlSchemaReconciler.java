@@ -31,7 +31,7 @@ import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.cql.SimpleStatement;
 import com.datastax.oss.driver.api.core.metadata.schema.ColumnMetadata;
 import com.datastax.oss.driver.api.core.metadata.schema.TableMetadata;
-import com.datastax.oss.driver.api.core.servererrors.InvalidQueryException;
+import com.datastax.oss.driver.api.core.servererrors.QueryValidationException;
 import com.datastax.oss.driver.api.core.servererrors.UnauthorizedException;
 import com.datastax.oss.driver.api.core.type.DataType;
 import com.datastax.oss.driver.api.core.type.DataTypes;
@@ -61,6 +61,7 @@ public class DdlSchemaReconciler {
   private final CassandraSinkConfig config;
   private final InstanceState state;
   private final ConcurrentMap<TableConfig, Resolved> resolved = new ConcurrentHashMap<>();
+  private final ConcurrentMap<TableConfig, Resolved> tombstones = new ConcurrentHashMap<>();
   private final ConcurrentMap<TableConfig, Object> locks = new ConcurrentHashMap<>();
 
   public DdlSchemaReconciler(CqlSession session, CassandraSinkConfig config, InstanceState state) {
@@ -69,18 +70,16 @@ public class DdlSchemaReconciler {
     this.state = state;
   }
 
-  /** Returns the mapper for the record, reconciling the table schema first. */
+  /**
+   * Returns the mapper for the record, reconciling the table schema first; null for a tombstone
+   * whose table does not exist.
+   */
+  @Nullable
   public RecordMapper mapperFor(TableConfig tableConfig, AbstractSinkRecord record) {
     if (record.value() == null) {
-      // A tombstone carries no value schema; deletes only need the prepared mapper.
+      // A tombstone carries no value schema; deletes only need the primary key.
       RecordMapper existing = state.getRecordMapper(tableConfig);
-      if (existing == null) {
-        throw new ConfigException(
-            String.format(
-                "Tombstone: cannot apply a delete to %s before its first non-null record",
-                tableConfig.getKeyspaceAndTable()));
-      }
-      return existing;
+      return existing != null ? existing : tombstoneMapper(tableConfig, record);
     }
     Object keyId = record.keySchemaIdentity();
     Object valueId = record.valueSchemaIdentity();
@@ -97,6 +96,77 @@ public class DdlSchemaReconciler {
       }
       return mapper;
     }
+  }
+
+  // Kept apart from the table's mapper so the first non-null record still reconciles the table.
+  @Nullable
+  private RecordMapper tombstoneMapper(TableConfig tableConfig, AbstractSinkRecord record) {
+    Object keyId = record.keySchemaIdentity();
+    RecordMapper mapper = Resolved.find(tombstones.get(tableConfig), keyId, null);
+    if (mapper != null) {
+      return mapper;
+    }
+    synchronized (locks.computeIfAbsent(tableConfig, t -> new Object())) {
+      Resolved cached = tombstones.get(tableConfig);
+      mapper = Resolved.find(cached, keyId, null);
+      if (mapper == null) {
+        Optional<TableMetadata> table = LifeCycleManager.findTableMetadata(session, tableConfig);
+        if (!table.isPresent()) {
+          return null;
+        }
+        mapper = prepareDelete(tableConfig, table.get(), record);
+        tombstones.put(tableConfig, Resolved.append(cached, keyId, null, mapper));
+      }
+      return mapper;
+    }
+  }
+
+  private RecordMapper prepareDelete(
+      TableConfig tableConfig, TableMetadata table, AbstractSinkRecord record) {
+    Map<CqlIdentifier, CqlIdentifier> configured = tableConfig.getMapping();
+    boolean deletes =
+        tableConfig.isDeletesEnabled()
+            && (tableConfig.isImplicit()
+                || table.getColumns().keySet().stream().allMatch(configured::containsKey));
+    if (!deletes) {
+      throw new ConfigException(
+          String.format(
+              "Tombstone: cannot apply a delete to %s before its first non-null record",
+              tableConfig.getKeyspaceAndTable()));
+    }
+    List<CqlIdentifier> primaryKey =
+        table.getPrimaryKey().stream().map(ColumnMetadata::getName).collect(Collectors.toList());
+    Map<CqlIdentifier, CqlIdentifier> mapping;
+    if (tableConfig.isImplicit()) {
+      AbstractSchema keySchema = record.keySchema();
+      if (keySchema == null || keySchema.type() != AbstractSchema.Type.STRUCT) {
+        throw new ConfigException(
+            String.format(
+                "Tombstone: deleting from %s needs a struct record key schema",
+                tableConfig.getKeyspaceAndTable()));
+      }
+      mapping =
+          ImplicitMapping.resolveColumns(
+              ImplicitMapping.forSchemas(keySchema, null),
+              table,
+              tableConfig.getKeyspaceAndTable());
+      requireKeyColumnsInPrimaryKey(tableConfig, table, mapping);
+    } else {
+      mapping = new LinkedHashMap<>();
+      for (Map.Entry<CqlIdentifier, CqlIdentifier> e : configured.entrySet()) {
+        if (primaryKey.contains(e.getKey())) {
+          mapping.put(e.getKey(), e.getValue());
+        }
+      }
+    }
+    LifeCycleManager.validateMappingColumns(table, tableConfig, mapping);
+    return state
+        .getTopicState(tableConfig.getTopicName())
+        .newDeleteOnlyMapper(
+            tableConfig,
+            primaryKey,
+            session.prepare(LifeCycleManager.makeDeleteStatement(tableConfig, table)),
+            mapping);
   }
 
   private RecordMapper reconcile(TableConfig tableConfig, AbstractSinkRecord record) {
@@ -275,7 +345,7 @@ public class DdlSchemaReconciler {
         session.execute(SimpleStatement.newInstance(cql));
       } catch (UnauthorizedException e) {
         throw notAuthorized("ALTER TABLE", tableConfig, e);
-      } catch (InvalidQueryException e) {
+      } catch (QueryValidationException e) {
         // Another task or worker may have added it first; existing columns are never retyped.
         session.refreshSchema();
         if (!visibleTable(tableConfig).getColumn(column.getKey()).isPresent()) {
@@ -423,8 +493,12 @@ public class DdlSchemaReconciler {
       session.execute(SimpleStatement.newInstance(cql));
     } catch (UnauthorizedException e) {
       throw notAuthorized(kind, tableConfig, e);
-    } catch (InvalidQueryException e) {
-      throw invalid(kind, tableConfig, cql, e);
+    } catch (QueryValidationException e) {
+      // Another task or worker may have created it first.
+      session.refreshSchema();
+      if (!LifeCycleManager.findTableMetadata(session, tableConfig).isPresent()) {
+        throw invalid(kind, tableConfig, cql, e);
+      }
     }
     if (!session.checkSchemaAgreement()) {
       log.warn(
@@ -435,7 +509,7 @@ public class DdlSchemaReconciler {
   }
 
   private static FatalSchemaException invalid(
-      String kind, TableConfig tableConfig, String cql, InvalidQueryException e) {
+      String kind, TableConfig tableConfig, String cql, QueryValidationException e) {
     return new FatalSchemaException(
         String.format(
             "Failed to run %s on %s (%s): %s",

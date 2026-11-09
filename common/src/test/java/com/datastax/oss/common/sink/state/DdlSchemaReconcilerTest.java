@@ -50,6 +50,7 @@ import com.datastax.oss.driver.api.core.metadata.Metadata;
 import com.datastax.oss.driver.api.core.metadata.schema.ColumnMetadata;
 import com.datastax.oss.driver.api.core.metadata.schema.KeyspaceMetadata;
 import com.datastax.oss.driver.api.core.metadata.schema.TableMetadata;
+import com.datastax.oss.driver.api.core.servererrors.InvalidConfigurationInQueryException;
 import com.datastax.oss.driver.api.core.servererrors.InvalidQueryException;
 import com.datastax.oss.driver.api.core.servererrors.UnauthorizedException;
 import com.datastax.oss.driver.api.core.type.DataType;
@@ -171,6 +172,7 @@ class DdlSchemaReconcilerTest {
     AbstractSinkRecord record = mock(AbstractSinkRecord.class);
     when(record.topic()).thenReturn(TOPIC);
     when(record.keySchema()).thenReturn(keySchema);
+    when(record.keySchemaIdentity()).thenReturn(keySchema);
     return record;
   }
 
@@ -345,7 +347,7 @@ class DdlSchemaReconcilerTest {
 
   @Test
   void should_quote_table_name_when_topic_needs_it() {
-    assertImplicitCreate("orders-v1.raw", "shop.\"orders-v1.raw\"");
+    assertImplicitCreate("2024_orders", "shop.\"2024_orders\"");
   }
 
   @Test
@@ -478,27 +480,68 @@ class DdlSchemaReconcilerTest {
   }
 
   @Test
-  void should_reject_tombstone_before_first_record_in_implicit_mode() {
+  void should_skip_tombstone_before_first_record_when_table_does_not_exist() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.empty());
     TableConfig tableConfig = implicitPending("orders");
 
-    assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, tombstone()))
-        .isInstanceOf(ConfigException.class)
-        .hasMessageContaining(
-            "cannot apply a delete to shop.orders before its first non-null record");
+    assertThat(reconciler().mapperFor(tableConfig, tombstone())).isNull();
     verify(session, never()).execute(any(Statement.class));
-    verify(session, never()).prepareAsync(anyString());
+    verify(session, never()).prepare(anyString());
   }
 
   @Test
-  void should_reject_tombstone_for_pending_explicit_binding() {
+  void should_delete_tombstone_before_first_record_in_implicit_mode() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    when(session.prepare(anyString())).thenReturn(mock(PreparedStatement.class));
+    TableConfig tableConfig = implicitPending("orders");
+    DdlSchemaReconciler reconciler = reconciler();
+
+    RecordMapper delete = reconciler.mapperFor(tableConfig, tombstone());
+
+    assertThat(delete).isNotNull().isSameAs(reconciler.mapperFor(tableConfig, tombstone()));
+    verify(session, times(1)).prepare("DELETE FROM shop.orders WHERE id = :id");
+    verify(session, never()).execute(any(Statement.class));
+    assertThat(state.getRecordMapper(tableConfig)).isNull();
+
+    RecordMapper first = reconciler.mapperFor(tableConfig, record(keySchema, valueSchema));
+    assertThat(first).isNotSameAs(delete).isSameAs(state.getRecordMapper(tableConfig));
+    assertThat(reconciler.mapperFor(tableConfig, tombstone())).isSameAs(first);
+  }
+
+  @Test
+  void should_delete_tombstone_before_first_record_for_pending_explicit_binding() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    when(session.prepare(anyString())).thenReturn(mock(PreparedStatement.class));
     TableConfig tableConfig = pending("id=key.id, name=value.name, ts=value.ts");
+
+    assertThat(reconciler().mapperFor(tableConfig, tombstone())).isNotNull();
+    verify(session).prepare("DELETE FROM shop.orders WHERE id = :id");
+    assertThat(state.getRecordMapper(tableConfig)).isNull();
+  }
+
+  @Test
+  void should_reject_tombstone_before_first_record_when_explicit_mapping_misses_columns() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    TableConfig tableConfig = pending("id=key.id, name=value.name");
 
     assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, tombstone()))
         .isInstanceOf(ConfigException.class)
         .hasMessageContaining(
             "cannot apply a delete to shop.orders before its first non-null record");
-    verify(session, never()).execute(any(Statement.class));
-    verify(session, never()).getMetadata();
+    verify(session, never()).prepare(anyString());
+  }
+
+  @Test
+  void should_reject_tombstone_before_first_record_without_struct_key_in_implicit_mode() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    TableConfig tableConfig = implicitPending("orders");
+    AbstractSinkRecord tombstone = tombstone();
+    when(tombstone.keySchema()).thenReturn(null);
+
+    assertThatThrownBy(() -> reconciler().mapperFor(tableConfig, tombstone))
+        .isInstanceOf(ConfigException.class)
+        .hasMessage("Tombstone: deleting from shop.orders needs a struct record key schema");
+    verify(session, never()).prepare(anyString());
   }
 
   @Test
@@ -647,6 +690,28 @@ class DdlSchemaReconcilerTest {
 
     verify(session, times(1)).execute(any(Statement.class));
     verify(session, atLeastOnce()).refreshSchema();
+    verify(session).prepareAsync(startsWith("INSERT INTO shop.orders(id,name,ts,email) VALUES"));
+    assertThat(mapper).isNotNull().isSameAs(state.getRecordMapper(tableConfig));
+  }
+
+  @Test
+  void should_continue_when_alter_fails_but_column_was_added_concurrently() {
+    evolvingTable("email");
+    CqlIdentifier email = CqlIdentifier.fromInternal("email");
+    when(session.execute(any(Statement.class)))
+        .thenAnswer(
+            i -> {
+              serverColumns.put(email, column(email, DataTypes.TEXT));
+              throw new InvalidConfigurationInQueryException(null, "Table ID mismatch");
+            });
+    TableConfig tableConfig = implicitPending("orders");
+
+    RecordMapper mapper =
+        reconciler()
+            .mapperFor(
+                tableConfig,
+                record(keySchema, valueWith("email", prim(AbstractSchema.Type.STRING, null))));
+
     verify(session).prepareAsync(startsWith("INSERT INTO shop.orders(id,name,ts,email) VALUES"));
     assertThat(mapper).isNotNull().isSameAs(state.getRecordMapper(tableConfig));
   }
@@ -887,7 +952,21 @@ class DdlSchemaReconcilerTest {
   }
 
   @Test
+  void should_continue_when_create_fails_but_table_was_created_concurrently() {
+    when(session.execute(any(Statement.class)))
+        .thenThrow(new InvalidConfigurationInQueryException(null, "Table ID mismatch"));
+    TableConfig tableConfig = implicitPending("orders");
+
+    RecordMapper mapper = reconciler().mapperFor(tableConfig, record(keySchema, valueSchema));
+
+    verify(session, atLeastOnce()).refreshSchema();
+    verify(session).prepareAsync(startsWith("INSERT INTO shop.orders(id,name,ts) VALUES"));
+    assertThat(mapper).isNotNull().isSameAs(state.getRecordMapper(tableConfig));
+  }
+
+  @Test
   void should_be_fatal_on_invalid_create() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.empty());
     when(session.execute(any(Statement.class)))
         .thenThrow(new InvalidQueryException(null, "too many tables"));
     TableConfig tableConfig = implicitPending("orders");

@@ -32,12 +32,16 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Creates keyspaces through the Astra DevOps API. */
 public class AstraKeyspaceCreator implements KeyspaceCreator {
   static final String DEFAULT_API_URL = "https://api.astra.datastax.com";
   private static final long POLL_INTERVAL_MILLIS = 2_000;
   private static final long TIMEOUT_MILLIS = 5 * 60_000;
+  private static final int MAX_TRANSIENT_FAILURES = 3;
+  private static final Logger log = LoggerFactory.getLogger(AstraKeyspaceCreator.class);
   private static final Pattern DB_ID =
       Pattern.compile("^([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})");
 
@@ -74,8 +78,29 @@ public class AstraKeyspaceCreator implements KeyspaceCreator {
     // in the driver metadata is what ends the wait.
     long deadline = System.nanoTime() + timeoutMillis * 1_000_000;
     boolean active = false;
+    int failures = 0;
     while (true) {
-      active = active || "ACTIVE".equals(client.getDatabaseStatus(databaseId));
+      if (!active) {
+        try {
+          active = "ACTIVE".equals(client.getDatabaseStatus(databaseId));
+          failures = 0;
+        } catch (TransientApiException e) {
+          if (++failures > MAX_TRANSIENT_FAILURES) {
+            throw new FatalSchemaException(
+                String.format(
+                    "%s after %d attempts; restart the connector to retry",
+                    e.getMessage(), failures),
+                e);
+          }
+          log.warn(
+              "Retrying the Astra DevOps API status check ({} of {}): {}",
+              failures,
+              MAX_TRANSIENT_FAILURES,
+              e.getMessage());
+          pause(pollIntervalMillis << (failures - 1));
+          continue;
+        }
+      }
       if (active) {
         session.refreshSchema();
         if (session.getMetadata().getKeyspace(keyspace).isPresent()) {
@@ -91,13 +116,13 @@ public class AstraKeyspaceCreator implements KeyspaceCreator {
                     "Database %s did not become ACTIVE after creating keyspace %s",
                     databaseId, keyspace.asInternal()));
       }
-      pause();
+      pause(pollIntervalMillis);
     }
   }
 
-  private void pause() {
+  private static void pause(long millis) {
     try {
-      Thread.sleep(pollIntervalMillis);
+      Thread.sleep(millis);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new FatalSchemaException("Interrupted while waiting for keyspace creation", e);
@@ -252,16 +277,25 @@ public class AstraKeyspaceCreator implements KeyspaceCreator {
     }
 
     private static FatalSchemaException unexpected(int code, String action) {
-      return new FatalSchemaException(
-          String.format("Astra DevOps API failed to %s (HTTP %d)", action, code));
+      String message = String.format("Astra DevOps API failed to %s (HTTP %d)", action, code);
+      return code == 429 || code >= 500
+          ? new TransientApiException(message, null)
+          : new FatalSchemaException(message);
     }
 
-    private FatalSchemaException unreachable(String action, IOException cause) {
-      return new FatalSchemaException(
+    private TransientApiException unreachable(String action, IOException cause) {
+      return new TransientApiException(
           String.format(
               "Cannot reach the Astra DevOps API at %s to %s (%s: %s); make sure the connector has network access to it, or create the keyspace manually",
               baseUrl, action, cause.getClass().getSimpleName(), cause.getMessage()),
           cause);
+    }
+  }
+
+  /** A DevOps API failure worth retrying: HTTP 429, 5xx, or no response. */
+  static class TransientApiException extends FatalSchemaException {
+    TransientApiException(String message, Throwable cause) {
+      super(message, cause);
     }
   }
 }

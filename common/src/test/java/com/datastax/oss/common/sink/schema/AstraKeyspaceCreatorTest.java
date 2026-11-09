@@ -128,6 +128,53 @@ class AstraKeyspaceCreatorTest {
 
       verify(client, times(1)).getDatabaseStatus("db1");
     }
+
+    @Test
+    void should_retry_transient_status_failures_and_reset_after_success() {
+      when(metadata.getKeyspace(shop))
+          .thenReturn(
+              Optional.empty(), Optional.empty(), Optional.of(mock(KeyspaceMetadata.class)));
+      when(client.getDatabaseStatus("db1"))
+          .thenThrow(transientFailure())
+          .thenReturn("MAINTENANCE")
+          .thenThrow(transientFailure(), transientFailure(), transientFailure())
+          .thenReturn("ACTIVE");
+
+      new AstraKeyspaceCreator(client, "db1", 1, 5000).ensureKeyspace(session, shop);
+
+      verify(client, times(6)).getDatabaseStatus("db1");
+    }
+
+    @Test
+    void should_be_fatal_after_too_many_consecutive_transient_failures() {
+      when(metadata.getKeyspace(shop)).thenReturn(Optional.empty());
+      when(client.getDatabaseStatus("db1")).thenThrow(transientFailure());
+
+      assertThatThrownBy(
+              () -> new AstraKeyspaceCreator(client, "db1", 1, 5000).ensureKeyspace(session, shop))
+          .isInstanceOf(FatalSchemaException.class)
+          .hasMessage(
+              "Astra DevOps API failed to read the status of database db1 (HTTP 503) after 4 attempts; restart the connector to retry");
+      verify(client, times(4)).getDatabaseStatus("db1");
+    }
+
+    @Test
+    void should_be_fatal_immediately_on_non_transient_status_failure() {
+      when(metadata.getKeyspace(shop)).thenReturn(Optional.empty());
+      when(client.getDatabaseStatus("db1"))
+          .thenThrow(new FatalSchemaException("Astra DevOps API failed (HTTP 404)"));
+
+      assertThatThrownBy(
+              () -> new AstraKeyspaceCreator(client, "db1", 1, 5000).ensureKeyspace(session, shop))
+          .isInstanceOf(FatalSchemaException.class)
+          .hasMessage("Astra DevOps API failed (HTTP 404)");
+      verify(client, times(1)).getDatabaseStatus("db1");
+    }
+
+    private AstraKeyspaceCreator.TransientApiException transientFailure() {
+      return new AstraKeyspaceCreator.TransientApiException(
+          "Astra DevOps API failed to read the status of database db1 (HTTP 503)", null);
+    }
   }
 
   @Nested
@@ -343,6 +390,28 @@ class AstraKeyspaceCreatorTest {
     }
 
     @Test
+    void should_classify_only_429_5xx_and_unreachable_as_transient() {
+      for (int code : new int[] {429, 500, 503}) {
+        status = code;
+        assertThatThrownBy(() -> client().getDatabaseStatus("db1"))
+            .isInstanceOf(AstraKeyspaceCreator.TransientApiException.class)
+            .hasMessageContaining(String.valueOf(code));
+      }
+      for (int code : new int[] {400, 401, 404}) {
+        status = code;
+        assertThatThrownBy(() -> client().getDatabaseStatus("db1"))
+            .isInstanceOf(FatalSchemaException.class)
+            .isNotInstanceOf(AstraKeyspaceCreator.TransientApiException.class);
+      }
+      int port = server.getAddress().getPort();
+      server.stop(0);
+      assertThatThrownBy(
+              () ->
+                  new DevOpsClient("http://127.0.0.1:" + port, token, 500).getDatabaseStatus("db1"))
+          .isInstanceOf(AstraKeyspaceCreator.TransientApiException.class);
+    }
+
+    @Test
     void should_report_unexpected_response_when_status_body_is_not_json() {
       status = 200;
       body = "canary-body";
@@ -351,6 +420,7 @@ class AstraKeyspaceCreatorTest {
           .isInstanceOf(FatalSchemaException.class)
           .hasMessageContaining("unexpected response from the Astra DevOps API")
           .hasNoCause()
+          .isNotInstanceOf(AstraKeyspaceCreator.TransientApiException.class)
           .satisfies(e -> assertThat(e.getMessage()).doesNotContain("Cannot reach"));
     }
   }

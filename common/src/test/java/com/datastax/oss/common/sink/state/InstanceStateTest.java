@@ -28,6 +28,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.codahale.metrics.MetricRegistry;
+import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.common.sink.config.CassandraSinkConfig;
 import com.datastax.oss.common.sink.config.MappingMode;
 import com.datastax.oss.common.sink.config.TableConfig;
@@ -206,7 +207,7 @@ class InstanceStateTest {
             executor.submit(
                 () -> {
                   start.await();
-                  return state.getTopicConfig("orders-v1.raw");
+                  return state.getTopicConfig("orders_V1");
                 }));
       }
       start.countDown();
@@ -216,16 +217,37 @@ class InstanceStateTest {
       }
       TableConfig table = first.getTableConfigs().iterator().next();
       assertThat(table.isImplicit()).isTrue();
-      assertThat(table.getKeyspaceAndTable()).isEqualTo("shop.\"orders-v1.raw\"");
+      assertThat(table.getKeyspaceAndTable()).isEqualTo("shop.orders_v1");
       assertThat(state.getRecordMapper(table)).isNull();
 
-      state.incrementRecordCounter("orders-v1.raw", "shop.\"orders-v1.raw\"", 2);
-      assertEquals(2, state.getRecordCounter("orders-v1.raw", "shop.\"orders-v1.raw\""));
+      state.incrementRecordCounter("orders_V1", "shop.orders_v1", 2);
+      assertEquals(2, state.getRecordCounter("orders_V1", "shop.orders_v1"));
       assertThat(metricRegistry.getNames())
-          .anyMatch(n -> n.contains("orders-v1.raw") && n.contains("recordCount"));
+          .anyMatch(n -> n.contains("orders_V1") && n.contains("recordCount"));
     } finally {
       executor.shutdownNow();
     }
+  }
+
+  @Test
+  void should_reject_regex_topic_that_is_not_a_valid_implicit_table_name() {
+    CassandraSinkConfig sinkConfig =
+        new CassandraSinkConfig(
+            ImmutableMap.of(
+                "name",
+                "inst",
+                "topics.regex",
+                "orders.*",
+                "mappingMode",
+                "IMPLICIT",
+                "keyspace",
+                "shop"));
+    InstanceState state =
+        new InstanceState(sinkConfig, session, new HashMap<>(), new MetricRegistry());
+
+    assertThatThrownBy(() -> state.getTopicConfig("orders-v1.raw"))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageStartingWith("Topic 'orders-v1.raw' cannot be used with mappingMode=IMPLICIT");
   }
 
   @Test

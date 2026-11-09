@@ -55,6 +55,8 @@ public class TableConfig extends AbstractConfig {
   static final String DELETES_ENABLED_OPT = "deletesEnabled";
   private static final String NULL_TO_UNSET_OPT = "nullToUnset";
   private static final Pattern DELIM_PAT = Pattern.compile(", *");
+  // Cassandra table names: alphanumerics and underscores, at most 48 characters.
+  private static final Pattern IMPLICIT_TABLE_NAME = Pattern.compile("[A-Za-z0-9_]{1,48}");
 
   private final String topicName;
   private final CqlIdentifier keyspace;
@@ -129,6 +131,12 @@ public class TableConfig extends AbstractConfig {
   @NonNull
   public static TableConfig implicit(
       @NonNull String topicName, @NonNull String keyspace, boolean cloud) {
+    if (!IMPLICIT_TABLE_NAME.matcher(topicName).matches()) {
+      throw new ConfigException(
+          String.format(
+              "Topic '%s' cannot be used with mappingMode=IMPLICIT: the table is named after the topic, so the topic name must contain only letters, digits and underscores (at most 48 characters). Use mappingMode=EXPLICIT to map this topic to a table.",
+              topicName));
+    }
     return new TableConfig(topicName, keyspace, topicName, Collections.emptyMap(), cloud, true);
   }
 
