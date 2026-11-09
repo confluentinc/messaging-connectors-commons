@@ -83,6 +83,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 @ExtendWith(LogInterceptingExtension.class)
 class CassandraSinkConfigTest {
@@ -1126,19 +1127,39 @@ class CassandraSinkConfigTest {
   @Test
   void should_name_implicit_table_like_lower_cased_topic() {
     Map<String, String> props = implicitBase();
-    props.put("topics", "orders-v1.raw,Orders");
+    props.put("topics", "orders_v1,Orders");
     CassandraSinkConfig c = new CassandraSinkConfig(props);
 
     assertThat(
             c.getTopicConfigs()
-                .get("orders-v1.raw")
+                .get("orders_v1")
                 .getTableConfigs()
                 .iterator()
                 .next()
                 .getKeyspaceAndTable())
-        .isEqualTo("shop.\"orders-v1.raw\"");
+        .isEqualTo("shop.orders_v1");
     assertThat(c.getTopicConfigs().get("Orders").getTableConfigs().iterator().next().getTable())
         .isEqualTo(CqlIdentifier.fromInternal("orders"));
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+    strings = {
+      "orders-v1",
+      "server.db.orders",
+      "t_234567890123456789012345678901234567890123456789"
+    }
+  )
+  void should_reject_implicit_topic_that_is_not_a_valid_table_name(String topic) {
+    Map<String, String> props = implicitBase();
+    props.put("topics", topic);
+
+    assertThatThrownBy(() -> new CassandraSinkConfig(props))
+        .isInstanceOf(ConfigException.class)
+        .hasMessage(
+            "Topic '"
+                + topic
+                + "' cannot be used with mappingMode=IMPLICIT: the table is named after the topic, so the topic name must contain only letters, digits and underscores (at most 48 characters). Use mappingMode=EXPLICIT to map this topic to a table.");
   }
 
   @Test

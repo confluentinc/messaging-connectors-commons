@@ -206,10 +206,18 @@ public abstract class AbstractSinkTask {
               new KeyValueRecord(
                   key.getInnerData(), value.getInnerData(), record.timestamp(), headers);
           Optional<DdlSchemaReconciler> reconciler = instanceState.getSchemaReconciler();
-          RecordMapper mapper =
-              reconciler.isPresent()
-                  ? reconciler.get().mapperFor(tableConfig, record)
-                  : instanceState.getRecordMapper(tableConfig);
+          RecordMapper mapper;
+          if (reconciler.isPresent()) {
+            mapper = reconciler.get().mapperFor(tableConfig, record);
+            if (mapper == null) {
+              log.debug(
+                  "Skipping tombstone for {}: the table does not exist",
+                  tableConfig.getKeyspaceAndTable());
+              continue;
+            }
+          } else {
+            mapper = instanceState.getRecordMapper(tableConfig);
+          }
           boundStatementsQueue.offer(
               new RecordAndStatement(
                   record,

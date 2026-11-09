@@ -90,6 +90,15 @@ class TopicState {
     tables.add(tableConfig);
   }
 
+  RecordMapper newDeleteOnlyMapper(
+      TableConfig tableConfig,
+      List<CqlIdentifier> primaryKey,
+      PreparedStatement deleteStatement,
+      Map<CqlIdentifier, CqlIdentifier> mapping) {
+    return RecordMapper.deleteOnly(
+        deleteStatement, primaryKey, new Mapping(mapping, codecFactory), tableConfig);
+  }
+
   private RecordMapper newRecordMapper(
       TableConfig tableConfig,
       List<CqlIdentifier> primaryKey,

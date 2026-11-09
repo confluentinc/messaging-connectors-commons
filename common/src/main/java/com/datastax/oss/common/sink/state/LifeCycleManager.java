@@ -171,7 +171,7 @@ public class LifeCycleManager {
     return validateMappingColumns(table, tableConfig, tableConfig.getMapping());
   }
 
-  private static boolean validateMappingColumns(
+  static boolean validateMappingColumns(
       TableMetadata table, TableConfig tableConfig, Map<CqlIdentifier, CqlIdentifier> mapping) {
     // The columns in the mapping are the keys. Check that each exists in the table.
     String nonExistentCols =
