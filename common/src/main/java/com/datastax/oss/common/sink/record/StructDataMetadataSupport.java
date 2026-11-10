@@ -21,8 +21,14 @@ import com.datastax.oss.common.sink.schema.CqlDdl;
 import com.datastax.oss.driver.api.core.type.reflect.GenericType;
 import com.datastax.oss.driver.shaded.guava.common.collect.ImmutableMap;
 import edu.umd.cs.findbugs.annotations.NonNull;
+import edu.umd.cs.findbugs.annotations.Nullable;
 import java.math.BigDecimal;
+import java.time.ZoneOffset;
 import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 public class StructDataMetadataSupport {
   private static final ImmutableMap<AbstractSchema.Type, GenericType<?>> TYPE_MAP =
@@ -40,14 +46,17 @@ public class StructDataMetadataSupport {
 
   @NonNull
   static GenericType<?> getGenericType(@NonNull AbstractSchema fieldType) {
-    // Logical values arrive as Date/BigDecimal, not their physical type.
+    // Logical values arrive as BigDecimal/Date; Date and Time are bound as LocalDate/LocalTime
+    // (see toJavaValue).
     String logicalName = fieldType.name();
     if (logicalName != null) {
       switch (logicalName) {
         case CqlDdl.DECIMAL:
           return GenericType.of(BigDecimal.class);
         case CqlDdl.DATE:
+          return GenericType.LOCAL_DATE;
         case CqlDdl.TIME:
+          return GenericType.LOCAL_TIME;
         case CqlDdl.TIMESTAMP:
           return GenericType.of(Date.class);
         default:
@@ -74,5 +83,37 @@ public class StructDataMetadataSupport {
         throw new IllegalArgumentException(
             String.format("Unrecognized Kafka field type: %s", fieldType.type().getName()));
     }
+  }
+
+  /**
+   * Connect Date and Time values are java.util.Date instants in UTC. Converting them here keeps the
+   * topic's codec time zone from shifting them.
+   */
+  @Nullable
+  static Object toJavaValue(@NonNull AbstractSchema schema, @Nullable Object value) {
+    if (value instanceof Date) {
+      String logicalName = schema.name();
+      if (CqlDdl.DATE.equals(logicalName)) {
+        return ((Date) value).toInstant().atOffset(ZoneOffset.UTC).toLocalDate();
+      }
+      if (CqlDdl.TIME.equals(logicalName)) {
+        return ((Date) value).toInstant().atOffset(ZoneOffset.UTC).toLocalTime();
+      }
+    } else if (value instanceof List && schema.type() == AbstractSchema.Type.ARRAY) {
+      AbstractSchema element = schema.valueSchema();
+      return ((List<?>) value)
+          .stream()
+          .map(v -> toJavaValue(element, v))
+          .collect(Collectors.toList());
+    } else if (value instanceof Map && schema.type() == AbstractSchema.Type.MAP) {
+      Map<Object, Object> converted = new LinkedHashMap<>();
+      ((Map<?, ?>) value)
+          .forEach(
+              (k, v) ->
+                  converted.put(
+                      toJavaValue(schema.keySchema(), k), toJavaValue(schema.valueSchema(), v)));
+      return converted;
+    }
+    return value;
   }
 }
