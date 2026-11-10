@@ -77,8 +77,9 @@ public class DdlSchemaReconciler {
   @Nullable
   public RecordMapper mapperFor(TableConfig tableConfig, AbstractSinkRecord record) {
     if (record.value() == null) {
-      // A tombstone carries no value schema; deletes only need the primary key.
-      RecordMapper existing = state.getRecordMapper(tableConfig);
+      // A tombstone carries no value schema; deletes only need the primary key. Implicit
+      // tombstones are checked against their own key schema, which may differ from the mapper's.
+      RecordMapper existing = tableConfig.isImplicit() ? null : state.getRecordMapper(tableConfig);
       return existing != null ? existing : tombstoneMapper(tableConfig, record);
     }
     Object keyId = record.keySchemaIdentity();
