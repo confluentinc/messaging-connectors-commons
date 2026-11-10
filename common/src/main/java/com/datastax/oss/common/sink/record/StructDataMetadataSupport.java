@@ -17,9 +17,12 @@ package com.datastax.oss.common.sink.record;
 
 import com.datastax.oss.common.sink.AbstractSchema;
 import com.datastax.oss.common.sink.AbstractStruct;
+import com.datastax.oss.common.sink.schema.CqlDdl;
 import com.datastax.oss.driver.api.core.type.reflect.GenericType;
 import com.datastax.oss.driver.shaded.guava.common.collect.ImmutableMap;
 import edu.umd.cs.findbugs.annotations.NonNull;
+import java.math.BigDecimal;
+import java.util.Date;
 
 public class StructDataMetadataSupport {
   private static final ImmutableMap<AbstractSchema.Type, GenericType<?>> TYPE_MAP =
@@ -37,6 +40,20 @@ public class StructDataMetadataSupport {
 
   @NonNull
   static GenericType<?> getGenericType(@NonNull AbstractSchema fieldType) {
+    // Logical values arrive as Date/BigDecimal, not their physical type.
+    String logicalName = fieldType.name();
+    if (logicalName != null) {
+      switch (logicalName) {
+        case CqlDdl.DECIMAL:
+          return GenericType.of(BigDecimal.class);
+        case CqlDdl.DATE:
+        case CqlDdl.TIME:
+        case CqlDdl.TIMESTAMP:
+          return GenericType.of(Date.class);
+        default:
+          break;
+      }
+    }
     GenericType<?> result = TYPE_MAP.get(fieldType.type());
     if (result != null) {
       return result;

@@ -32,12 +32,14 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.datastax.oss.common.sink.config.TableConfig;
+import com.datastax.oss.common.sink.record.RawData;
 import com.datastax.oss.common.sink.record.Record;
 import com.datastax.oss.common.sink.record.RecordMetadata;
 import com.datastax.oss.common.sink.util.SinkUtil;
@@ -335,6 +337,58 @@ class RecordMapperTest {
 
     Statement result = mapper.map(recordMetadata, record);
     assertThat(result).isSameAs(deleteBoundStatement);
+    verify(deleteBoundStatementBuilder, times(2))
+        .setBytesUnsafe(variableCaptor.capture(), valueCaptor.capture());
+    assertParameter(0, C1, TypeCodecs.INT.encode(42, V4));
+    assertParameter(1, C3, TypeCodecs.TEXT.encode("foo", V4));
+  }
+
+  @Test
+  void should_insert_in_implicit_mode_when_non_pk_fields_are_null() {
+    when(record.fields()).thenReturn(set(F1, F2, F3));
+    when(record.getFieldValue(F2)).thenReturn(null);
+    when(tableConfigNullToUnsetTrue.isImplicit()).thenReturn(true);
+    RecordMapper mapper =
+        new RecordMapper(
+            insertUpdateStatement,
+            deleteStatement,
+            primaryKeys,
+            mapping,
+            true,
+            false,
+            tableConfigNullToUnsetTrue);
+
+    assertThat(mapper.map(recordMetadata, record)).isSameAs(insertUpdateBoundStatement);
+    verify(deleteStatement, never()).boundStatementBuilder();
+  }
+
+  @Test
+  void should_delete_in_implicit_mode_on_tombstone() {
+    when(record.fields()).thenReturn(set(F1, F3, RawData.VALUE_FIELD_NAME));
+    when(tableConfigNullToUnsetTrue.isImplicit()).thenReturn(true);
+    RecordMapper mapper =
+        new RecordMapper(
+            insertUpdateStatement,
+            deleteStatement,
+            primaryKeys,
+            mapping,
+            true,
+            true,
+            tableConfigNullToUnsetTrue);
+
+    assertThat(mapper.map(recordMetadata, record)).isSameAs(deleteBoundStatement);
+    verify(insertUpdateStatement, never()).boundStatementBuilder();
+  }
+
+  @Test
+  void should_delete_with_delete_only_mapper_even_when_non_pk_fields_are_set() {
+    when(record.fields()).thenReturn(set(F1, F2, F3));
+    RecordMapper mapper =
+        RecordMapper.deleteOnly(deleteStatement, primaryKeys, mapping, tableConfigNullToUnsetTrue);
+
+    Statement result = mapper.map(recordMetadata, record);
+    assertThat(result).isSameAs(deleteBoundStatement);
+    verify(insertUpdateStatement, never()).boundStatementBuilder();
     verify(deleteBoundStatementBuilder, times(2))
         .setBytesUnsafe(variableCaptor.capture(), valueCaptor.capture());
     assertParameter(0, C1, TypeCodecs.INT.encode(42, V4));

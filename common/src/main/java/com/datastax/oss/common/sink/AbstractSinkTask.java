@@ -23,6 +23,8 @@ import com.datastax.oss.common.sink.record.HeadersDataMetadata;
 import com.datastax.oss.common.sink.record.KeyValueRecord;
 import com.datastax.oss.common.sink.record.KeyValueRecordMetadata;
 import com.datastax.oss.common.sink.record.RecordAndStatement;
+import com.datastax.oss.common.sink.schema.FatalSchemaException;
+import com.datastax.oss.common.sink.state.DdlSchemaReconciler;
 import com.datastax.oss.common.sink.state.InstanceState;
 import com.datastax.oss.common.sink.state.LifeCycleManager;
 import com.datastax.oss.driver.api.core.cql.AsyncResultSet;
@@ -34,6 +36,7 @@ import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
@@ -202,7 +205,19 @@ public abstract class AbstractSinkTask {
           KeyValueRecord keyValueRecord =
               new KeyValueRecord(
                   key.getInnerData(), value.getInnerData(), record.timestamp(), headers);
-          RecordMapper mapper = instanceState.getRecordMapper(tableConfig);
+          Optional<DdlSchemaReconciler> reconciler = instanceState.getSchemaReconciler();
+          RecordMapper mapper;
+          if (reconciler.isPresent()) {
+            mapper = reconciler.get().mapperFor(tableConfig, record);
+            if (mapper == null) {
+              log.debug(
+                  "Skipping tombstone for {}: the table does not exist",
+                  tableConfig.getKeyspaceAndTable());
+              continue;
+            }
+          } else {
+            mapper = instanceState.getRecordMapper(tableConfig);
+          }
           boundStatementsQueue.offer(
               new RecordAndStatement(
                   record,
@@ -215,6 +230,8 @@ public abstract class AbstractSinkTask {
                               new HeadersDataMetadata(headers)),
                           keyValueRecord)
                       .setConsistencyLevel(tableConfig.getConsistencyLevel())));
+        } catch (FatalSchemaException e) {
+          throw e;
         } catch (Exception ex) {
           // An IOException can theoretically happen when processing json data. But bad json
           // won't result in this exception. We're not pulling data from a file or any other kind of
@@ -224,6 +241,8 @@ public abstract class AbstractSinkTask {
           doHandleFailure(record, ex, null, failedRecordIncrement);
         }
       }
+    } catch (FatalSchemaException e) {
+      throw e;
     } catch (Exception e) {
       // A KafkaException could occur if the record references an unknown topic.
       // Most likely this error can't occur in this application...but we try to protect ourselves
