@@ -20,6 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.datastax.oss.common.sink.AbstractField;
 import com.datastax.oss.common.sink.AbstractSchema;
 import com.datastax.oss.common.sink.schema.CqlDdl;
+import com.datastax.oss.common.sink.schema.FakeSchema;
 import com.datastax.oss.driver.api.core.type.DataType;
 import com.datastax.oss.driver.api.core.type.DataTypes;
 import com.datastax.oss.driver.api.core.type.reflect.GenericType;
@@ -32,7 +33,9 @@ import java.nio.ByteBuffer;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -73,15 +76,19 @@ class StructDataMetadataSupportTest {
     };
   }
 
-  private static ConvertingCodecFactory codecFactory() {
-    ConversionContext context = new TextConversionContext().setTimeZone(ZoneOffset.UTC);
+  private static ConvertingCodecFactory codecFactory(ZoneId timeZone) {
+    ConversionContext context = new TextConversionContext().setTimeZone(timeZone);
     return new ConvertingCodecFactory(new DefaultCodecRegistry("test"), context);
   }
 
-  @SuppressWarnings("unchecked")
   private static Object convert(DataType cqlType, Object value) {
+    return convert(cqlType, value, ZoneOffset.UTC);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Object convert(DataType cqlType, Object value, ZoneId timeZone) {
     GenericType<Object> javaType = (GenericType<Object>) GenericType.of(value.getClass());
-    return codecFactory()
+    return codecFactory(timeZone)
         .<Object, Object>createConvertingCodec(cqlType, javaType, true)
         .externalToInternal(value);
   }
@@ -92,12 +99,18 @@ class StructDataMetadataSupportTest {
             StructDataMetadataSupport.getGenericType(
                 schema(AbstractSchema.Type.BYTES, CqlDdl.DECIMAL)))
         .isEqualTo(GenericType.of(BigDecimal.class));
-    for (String name : new String[] {CqlDdl.DATE, CqlDdl.TIME, CqlDdl.TIMESTAMP}) {
-      AbstractSchema.Type physical =
-          name.equals(CqlDdl.TIMESTAMP) ? AbstractSchema.Type.INT64 : AbstractSchema.Type.INT32;
-      assertThat(StructDataMetadataSupport.getGenericType(schema(physical, name)))
-          .isEqualTo(GenericType.of(Date.class));
-    }
+    assertThat(
+            StructDataMetadataSupport.getGenericType(
+                schema(AbstractSchema.Type.INT32, CqlDdl.DATE)))
+        .isEqualTo(GenericType.LOCAL_DATE);
+    assertThat(
+            StructDataMetadataSupport.getGenericType(
+                schema(AbstractSchema.Type.INT32, CqlDdl.TIME)))
+        .isEqualTo(GenericType.LOCAL_TIME);
+    assertThat(
+            StructDataMetadataSupport.getGenericType(
+                schema(AbstractSchema.Type.INT64, CqlDdl.TIMESTAMP)))
+        .isEqualTo(GenericType.of(Date.class));
   }
 
   @Test
@@ -130,15 +143,53 @@ class StructDataMetadataSupportTest {
   }
 
   @Test
-  void should_convert_date_to_cql_date() {
-    Date date = Date.from(LocalDate.of(2024, 3, 15).atStartOfDay().toInstant(ZoneOffset.UTC));
-    assertThat(convert(DataTypes.DATE, date)).isEqualTo(LocalDate.of(2024, 3, 15));
+  void should_bind_connect_date_and_time_independently_of_the_codec_time_zone() {
+    Date midnight = Date.from(LocalDate.of(2026, 11, 10).atStartOfDay().toInstant(ZoneOffset.UTC));
+    Date oneAm = new Date(3_600_000L);
+    Object day =
+        StructDataMetadataSupport.toJavaValue(
+            schema(AbstractSchema.Type.INT32, CqlDdl.DATE), midnight);
+    Object time =
+        StructDataMetadataSupport.toJavaValue(
+            schema(AbstractSchema.Type.INT32, CqlDdl.TIME), oneAm);
+    assertThat(day).isEqualTo(LocalDate.of(2026, 11, 10));
+    assertThat(time).isEqualTo(LocalTime.of(1, 0));
+
+    ZoneId newYork = ZoneId.of("America/New_York");
+    // Binding the raw Date would shift it into the codec time zone.
+    assertThat(convert(DataTypes.DATE, midnight, newYork)).isEqualTo(LocalDate.of(2026, 11, 9));
+    assertThat(convert(DataTypes.DATE, day, newYork)).isEqualTo(LocalDate.of(2026, 11, 10));
+    assertThat(convert(DataTypes.TIME, time, newYork)).isEqualTo(LocalTime.of(1, 0));
   }
 
   @Test
-  void should_convert_date_to_cql_time() {
-    Date date = new Date(((13L * 60 + 45) * 60 + 30) * 1000 + 250);
-    assertThat(convert(DataTypes.TIME, date)).isEqualTo(LocalTime.of(13, 45, 30, 250_000_000));
+  void should_convert_dates_inside_collections() {
+    Date midnight = Date.from(LocalDate.of(2024, 3, 15).atStartOfDay().toInstant(ZoneOffset.UTC));
+    AbstractSchema date = FakeSchema.prim(AbstractSchema.Type.INT32, CqlDdl.DATE);
+    assertThat(
+            StructDataMetadataSupport.toJavaValue(
+                FakeSchema.array(date), Collections.singletonList(midnight)))
+        .isEqualTo(Collections.singletonList(LocalDate.of(2024, 3, 15)));
+    assertThat(
+            StructDataMetadataSupport.toJavaValue(
+                FakeSchema.map(FakeSchema.prim(AbstractSchema.Type.STRING, null), date),
+                Collections.singletonMap("d", midnight)))
+        .isEqualTo(Collections.singletonMap("d", LocalDate.of(2024, 3, 15)));
+  }
+
+  @Test
+  void should_leave_other_values_unchanged() {
+    Date instant = new Date(1_700_000_000_123L);
+    assertThat(
+            StructDataMetadataSupport.toJavaValue(
+                schema(AbstractSchema.Type.INT64, CqlDdl.TIMESTAMP), instant))
+        .isSameAs(instant);
+    assertThat(StructDataMetadataSupport.toJavaValue(schema(AbstractSchema.Type.INT32, null), 7))
+        .isEqualTo(7);
+    assertThat(
+            StructDataMetadataSupport.toJavaValue(
+                schema(AbstractSchema.Type.INT32, CqlDdl.DATE), null))
+        .isNull();
   }
 
   @Test

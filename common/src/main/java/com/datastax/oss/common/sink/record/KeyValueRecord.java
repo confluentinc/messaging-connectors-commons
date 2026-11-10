@@ -81,7 +81,9 @@ public class KeyValueRecord implements Record {
       @NonNull String field, @NonNull Iterable<AbstractSinkRecordHeader> headers) {
     for (AbstractSinkRecordHeader h : headers) {
       if (h.key().equals(field)) {
-        return h.value();
+        return h.schema() == null
+            ? h.value()
+            : StructDataMetadataSupport.toJavaValue(h.schema(), h.value());
       }
     }
     return null;

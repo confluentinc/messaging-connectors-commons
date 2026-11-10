@@ -22,8 +22,15 @@ import com.datastax.oss.common.sink.AbstractStruct;
 import com.datastax.oss.common.sink.SchemaImpl;
 import com.datastax.oss.common.sink.SchemaImpl.FieldImpl;
 import com.datastax.oss.common.sink.StructImpl;
+import com.datastax.oss.common.sink.schema.CqlDdl;
+import com.datastax.oss.common.sink.schema.FakeSchema;
 import java.nio.ByteBuffer;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.ZoneOffset;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
 import org.junit.jupiter.api.Test;
 
 class StructDataTest {
@@ -54,6 +61,36 @@ class StructDataTest {
     // retrieve it because the driver requires the input to be a ByteBuffer
     // when encoding for a blob column.
     assertThat(structData.getFieldValue("bytes")).isEqualTo(ByteBuffer.wrap(bytesArray));
+  }
+
+  @Test
+  void should_return_connect_date_and_time_as_local_values() {
+    AbstractSchema dateSchema = FakeSchema.prim(AbstractSchema.Type.INT32, CqlDdl.DATE);
+    AbstractSchema timeSchema = FakeSchema.prim(AbstractSchema.Type.INT32, CqlDdl.TIME);
+    AbstractSchema tsSchema = FakeSchema.prim(AbstractSchema.Type.INT64, CqlDdl.TIMESTAMP);
+    Date midnight = Date.from(LocalDate.of(2026, 11, 10).atStartOfDay().toInstant(ZoneOffset.UTC));
+    Date oneAm = new Date(3_600_000L);
+    AbstractStruct logical =
+        new StructImpl(
+                FakeSchema.struct(
+                    "day",
+                    dateSchema,
+                    "tm",
+                    timeSchema,
+                    "ts",
+                    tsSchema,
+                    "days",
+                    FakeSchema.array(dateSchema)))
+            .put("day", midnight)
+            .put("tm", oneAm)
+            .put("ts", midnight)
+            .put("days", Collections.singletonList(midnight));
+    StructData data = new StructData(logical);
+    assertThat(data.getFieldValue("day")).isEqualTo(LocalDate.of(2026, 11, 10));
+    assertThat(data.getFieldValue("tm")).isEqualTo(LocalTime.of(1, 0));
+    assertThat(data.getFieldValue("ts")).isSameAs(midnight);
+    assertThat(data.getFieldValue("days"))
+        .isEqualTo(Collections.singletonList(LocalDate.of(2026, 11, 10)));
   }
 
   @Test
