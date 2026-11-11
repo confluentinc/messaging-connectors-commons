@@ -468,15 +468,52 @@ class DdlSchemaReconcilerTest {
   }
 
   @Test
-  void should_return_resolved_mapper_for_tombstone_without_ddl() {
+  void should_use_a_cached_delete_mapper_for_implicit_tombstones_without_ddl() {
     when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    when(session.prepare(anyString())).thenReturn(mock(PreparedStatement.class));
     TableConfig tableConfig = implicitPending("orders");
     DdlSchemaReconciler reconciler = reconciler();
     RecordMapper first = reconciler.mapperFor(tableConfig, record(keySchema, valueSchema));
 
-    assertThat(reconciler.mapperFor(tableConfig, tombstone())).isSameAs(first);
+    RecordMapper delete = reconciler.mapperFor(tableConfig, tombstone());
+    assertThat(delete).isNotNull().isNotSameAs(first);
+    assertThat(reconciler.mapperFor(tableConfig, tombstone())).isSameAs(delete);
     verify(session, never()).execute(any(Statement.class));
     verify(session, times(1)).prepareAsync(startsWith("INSERT"));
+    verify(session, times(1)).prepare("DELETE FROM shop.orders WHERE id = :id");
+  }
+
+  @Test
+  void should_reject_implicit_tombstone_whose_key_is_not_the_primary_key_after_the_first_record() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    TableConfig tableConfig = implicitPending("orders");
+    DdlSchemaReconciler reconciler = reconciler();
+    reconciler.mapperFor(tableConfig, record(keySchema, valueSchema));
+    AbstractSchema wider =
+        struct(
+            "id",
+            prim(AbstractSchema.Type.INT64, null),
+            "name",
+            prim(AbstractSchema.Type.STRING, null));
+    AbstractSinkRecord tombstone = tombstone();
+    when(tombstone.keySchema()).thenReturn(wider);
+    when(tombstone.keySchemaIdentity()).thenReturn(wider);
+
+    assertThatThrownBy(() -> reconciler.mapperFor(tableConfig, tombstone))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining("key columns not in the primary key: name");
+    verify(session, never()).prepare(anyString());
+  }
+
+  @Test
+  void should_return_resolved_mapper_for_explicit_tombstone_without_ddl() {
+    when(keyspace.getTable(ORDERS)).thenReturn(Optional.of(table));
+    TableConfig tableConfig = pending("id=key.id, name=value.name, ts=value.ts");
+    DdlSchemaReconciler reconciler = reconciler();
+    RecordMapper first = reconciler.mapperFor(tableConfig, record(keySchema, valueSchema));
+
+    assertThat(reconciler.mapperFor(tableConfig, tombstone())).isSameAs(first);
+    verify(session, never()).prepare(anyString());
   }
 
   @Test
@@ -505,7 +542,7 @@ class DdlSchemaReconcilerTest {
 
     RecordMapper first = reconciler.mapperFor(tableConfig, record(keySchema, valueSchema));
     assertThat(first).isNotSameAs(delete).isSameAs(state.getRecordMapper(tableConfig));
-    assertThat(reconciler.mapperFor(tableConfig, tombstone())).isSameAs(first);
+    assertThat(reconciler.mapperFor(tableConfig, tombstone())).isSameAs(delete);
   }
 
   @Test

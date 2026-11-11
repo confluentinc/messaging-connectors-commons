@@ -21,7 +21,10 @@ import com.datastax.oss.common.sink.AbstractStruct;
 import edu.umd.cs.findbugs.annotations.Nullable;
 import java.nio.ByteBuffer;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -62,6 +65,10 @@ public class StructData implements KeyOrValue {
     if (value instanceof byte[]) {
       // The driver requires a ByteBuffer rather than byte[] when inserting a blob.
       return ByteBuffer.wrap((byte[]) value);
+    }
+    if (value instanceof Date || value instanceof List || value instanceof Map) {
+      AbstractField f = struct.schema().field(field);
+      return f == null ? value : StructDataMetadataSupport.toJavaValue(f.schema(), value);
     }
     return value;
   }
